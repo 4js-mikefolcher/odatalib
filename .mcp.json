@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "genero": {
-      "type": "http",
-      "url": "https://genero-intelligence-test.michael-folcher.workers.dev/mcp"
-    }
- 
-  }
-}
