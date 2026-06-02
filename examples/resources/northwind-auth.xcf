@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  GAS deployment descriptor for the Northwind OData service WITH OAuth 2.0.
+
+  Structure mirrors GIP's own delegate-consumer services (e.g.
+  GeneroProfileService.xcf): NO POOL and NO ACCESS_CONTROL block. A delegate
+  service must not pre-start a pooled DVM; doing so crashed the fastcgidispatch
+  when the service was lazy-loaded during a request.
+
+  Deploy: copy into the dispatcher's services dir
+          (.../gas/appdata/services), then (re)start the dispatcher so the
+          service + its delegate chain load at startup. Reachable at:
+          https://mikemac/gas6/ws/r/northwind-auth/northwind/
+
+  Per request: client (Bearer token) to Apache to fastcgidispatch, which
+    delegates to GeneroAccessService (validates token vs the gas6 IdP, injects
+    X-FourJs-Environment-OIDC_SUB / SCOPES / OIDC_ACCESS_TOKEN), then to the
+    NorthwindService DVM (ODataAuth scope gate).
+-->
+<APPLICATION Parent="ws.default"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation="https://4js.com/ns/gas/6.00/cfextws.xsd">
+
+  <!-- Absolute path to the project checkout (edit for your machine). -->
+  <RESOURCE Id="odata.project.dir" Source="INTERNAL">/Volumes/SandiskSD/fgl-odata</RESOURCE>
+
+  <EXECUTION>
+    <!-- Resolve the odatalib package and the example modules. -->
+    <ENVIRONMENT_VARIABLE Id="FGLLDPATH" Concat="APPEND">$(odata.project.dir)/src:$(odata.project.dir)/examples</ENVIRONMENT_VARIABLE>
+
+    <!-- Absolute path to the .odata config (the DVM cwd is not the examples dir). -->
+    <ENVIRONMENT_VARIABLE Id="ODATA_CONFIG">$(odata.project.dir)/examples/northwind.odata</ENVIRONMENT_VARIABLE>
+
+    <PATH>$(odata.project.dir)/examples</PATH>
+    <MODULE>NorthwindService</MODULE>
+
+    <!-- Delegate bearer-token validation to GIP's access service. On success it
+         injects OIDC_SUB / SCOPES / OIDC_ACCESS_TOKEN into this service's
+         context, which ODataService.buildAuthContext reads. The <IDP> value
+         MUST equal the token issuer (AccessService rejects on mismatch). -->
+    <DELEGATE service="services/GeneroAccessService">
+      <IDP>https://mikemac/gas6/ws/r/services/GeneroIdentityProvider</IDP>
+    </DELEGATE>
+  </EXECUTION>
+</APPLICATION>

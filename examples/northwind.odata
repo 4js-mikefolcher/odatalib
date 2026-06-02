@@ -1,0 +1,44 @@
+{
+  "service": "northwind",
+  "namespace": "Northwind",
+  "entities": [
+    {
+      "name": "Customers",
+      "entityType": "Customer",
+      "provider": "sql",
+      "source": "customers",
+      "key": "CustomerID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "CustomerID",  "column": "customer_id",  "type": "Edm.String", "key": true },
+        { "name": "CompanyName", "column": "company_name", "type": "Edm.String" },
+        { "name": "Country",     "column": "country",      "type": "Edm.String" }
+      ]
+    },
+    {
+      "name": "Orders",
+      "entityType": "Order",
+      "provider": "sql",
+      "source": "orders",
+      "key": "OrderID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "OrderID",    "column": "order_id",    "type": "Edm.Int32",   "key": true },
+        { "name": "CustomerID", "column": "customer_id", "type": "Edm.String" },
+        { "name": "Freight",    "column": "freight",     "type": "Edm.Decimal" }
+      ]
+    },
+    {
+      "name": "CountrySummary",
+      "entityType": "CountrySummary",
+      "provider": "function",
+      "source": "country_summary",
+      "key": "Country",
+      "pageSize": 50,
+      "properties": [
+        { "name": "Country",       "type": "Edm.String", "key": true },
+        { "name": "CustomerCount", "type": "Edm.Int32" }
+      ]
+    }
+  ]
+}
