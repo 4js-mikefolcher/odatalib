@@ -1,0 +1,96 @@
+{
+  "service": "northwind",
+  "namespace": "Northwind",
+  "entities": [
+    {
+      "name": "Customers",
+      "entityType": "Customer",
+      "provider": "sql",
+      "source": "customers",
+      "key": "CustomerID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "CustomerID",   "column": "customerid",   "type": "Edm.String", "key": true },
+        { "name": "CompanyName",  "column": "companyname",  "type": "Edm.String" },
+        { "name": "ContactName",  "column": "contactname",  "type": "Edm.String" },
+        { "name": "City",         "column": "city",         "type": "Edm.String" },
+        { "name": "Country",      "column": "country",      "type": "Edm.String" },
+        { "name": "Phone",        "column": "phone",        "type": "Edm.String" }
+      ]
+    },
+    {
+      "name": "Orders",
+      "entityType": "Order",
+      "provider": "sql",
+      "source": "orders",
+      "key": "OrderID",
+      "pageSize": 100,
+      "properties": [
+        { "name": "OrderID",      "column": "orderid",      "type": "Edm.Int32", "key": true },
+        { "name": "CustomerID",   "column": "customerid",   "type": "Edm.String" },
+        { "name": "EmployeeID",   "column": "employeeid",   "type": "Edm.Int32" },
+        { "name": "OrderDate",    "column": "orderdate",    "type": "Edm.Date" },
+        { "name": "ShippedDate",  "column": "shippeddate",  "type": "Edm.Date" },
+        { "name": "Freight",      "column": "freight",      "type": "Edm.Single" },
+        { "name": "ShipCountry",  "column": "shipcountry",  "type": "Edm.String" },
+        { "name": "ShipCity",     "column": "shipcity",     "type": "Edm.String" }
+      ]
+    },
+    {
+      "name": "Products",
+      "entityType": "Product",
+      "provider": "sql",
+      "source": "products",
+      "key": "ProductID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "ProductID",    "column": "productid",    "type": "Edm.Int32", "key": true },
+        { "name": "ProductName",  "column": "productname",  "type": "Edm.String" },
+        { "name": "SupplierID",   "column": "supplierid",   "type": "Edm.Int32" },
+        { "name": "CategoryID",   "column": "categoryid",   "type": "Edm.Int32" },
+        { "name": "UnitPrice",    "column": "unitprice",    "type": "Edm.Single" },
+        { "name": "UnitsInStock", "column": "unitsinstock", "type": "Edm.Int16" },
+        { "name": "Discontinued", "column": "discontinued", "type": "Edm.Int32" }
+      ]
+    },
+    {
+      "name": "Categories",
+      "entityType": "Category",
+      "provider": "sql",
+      "source": "categories",
+      "key": "CategoryID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "CategoryID",   "column": "categoryid",   "type": "Edm.Int32", "key": true },
+        { "name": "CategoryName", "column": "categoryname", "type": "Edm.String" },
+        { "name": "Description",  "column": "description",  "type": "Edm.String" }
+      ]
+    },
+    {
+      "name": "Suppliers",
+      "entityType": "Supplier",
+      "provider": "sql",
+      "source": "suppliers",
+      "key": "SupplierID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "SupplierID",   "column": "supplierid",   "type": "Edm.Int32", "key": true },
+        { "name": "CompanyName",  "column": "companyname",  "type": "Edm.String" },
+        { "name": "City",         "column": "city",         "type": "Edm.String" },
+        { "name": "Country",      "column": "country",      "type": "Edm.String" }
+      ]
+    },
+    {
+      "name": "CountrySummary",
+      "entityType": "CountrySummary",
+      "provider": "function",
+      "source": "country_summary",
+      "key": "Country",
+      "pageSize": 50,
+      "properties": [
+        { "name": "Country",       "type": "Edm.String", "key": true },
+        { "name": "CustomerCount", "type": "Edm.Int32" }
+      ]
+    }
+  ]
+}

@@ -254,6 +254,28 @@ fglrun NorthwindService    # then deploy/route via GAS as a REST service
 / ordered / counted / paged collections, a key lookup, and the error responses
 — a full end-to-end validation of the framework logic.
 
+### Against a real PostgreSQL Northwind
+
+For a richer, strictly-typed dataset (the full 14-table Northwind, with numeric,
+`real` and `date` columns), point the example at a PostgreSQL `northwind`
+database. `examples/fglprofile` maps the `northwind` connection name to the
+`dbmpgs` driver, and `examples/northwind-pg.odata` declares the larger schema
+(Customers, Orders, Products, Categories, Suppliers + the CountrySummary
+function provider) with the real Postgres column names and `Edm.*` types.
+
+```bash
+export FGLLDPATH="$PWD/src:$PWD/examples:$FGLLDPATH"
+export FGLPROFILE="$PWD/examples/fglprofile"      # northwind -> dbmpgs @ localhost:5432
+cd examples
+fglcomp -M NorthwindFunctions.4gl PgSmokeTest.4gl
+FGLGUI=0 fglrun PgSmokeTest                       # connects as nwuser
+```
+
+`PgSmokeTest` exercises the type-aware paths SQLite's loose typing hides:
+integer / `real` / `date` `$filter`s, an integer key lookup, and `Edm.Date`
+serialisation. This is the dataset used to verify the type-aware binding and
+`LIKE`-escaping fixes noted under [Limitations & roadmap](#limitations--roadmap).
+
 ## Consuming from Power BI
 
 Power BI Desktop → **Get Data → OData feed** → enter the service URL
@@ -299,8 +321,22 @@ including Power BI; the body is well-formed CSDL.
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
 **Known v0 caveats:**
-- Filter values are bound as strings; comparing to non-text columns relies on
-  DB coercion (fine for SQLite/most engines; type-aware binding is a follow-up).
 - `@odata.nextLink` percent-encodes the common OData filter charset; a full
   RFC 3986 encoder is a follow-up.
-- `LIKE` filter values are not wildcard-escaped (`%`/`_` in user input).
+- `Edm.Single` (4-byte float) columns serialise with their full binary widening
+  (e.g. a stored `32.38` may emit as `32.380001…`); round-tripping `Edm.Single`
+  at single precision is a follow-up. `Edm.Decimal` columns are unaffected.
+- `$filter` `eq null` binds the literal text `null` rather than translating to
+  SQL `IS NULL`; explicit null handling is a follow-up.
+
+**Recently closed (verified against PostgreSQL Northwind):**
+- *Type-aware filter binding.* `$filter` and key-predicate values are now bound
+  with the program-variable type implied by the property's `Edm.*` type
+  (`Edm.Int16/32/64`, `Edm.Single/Double/Decimal`, `Edm.Date`), so numeric and
+  date comparisons — and integer key lookups like `Orders(10248)` — work on
+  strict engines. Previously every value was bound as a string, which Postgres
+  rejected with *"operator does not exist: real > character varying"*. A literal
+  that does not match its column type is now a clean `400`, not a `500`.
+- *`LIKE` wildcard escaping.* `contains`/`startswith`/`endswith` values are
+  escaped (`%`, `_`, `\`) and matched with an `ESCAPE '\'` clause, so user input
+  is matched literally instead of acting as SQL wildcards.

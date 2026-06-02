@@ -1,0 +1,10 @@
+# FGLPROFILE for the odatalib Postgres Northwind example.
+#
+# Maps the "northwind" database name used in CONNECT TO onto the Genero
+# PostgreSQL ODI driver. Host/port default to localhost:5432 (libpq), which
+# is where the sample database lives; override with PGHOST/PGPORT if needed.
+#
+# Usage:
+#   export FGLPROFILE="$PWD/fglprofile"
+dbi.database.northwind.source = "northwind@localhost:5432"
+dbi.database.northwind.driver = "dbmpgs"

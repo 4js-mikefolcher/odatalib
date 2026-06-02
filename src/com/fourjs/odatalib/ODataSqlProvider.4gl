@@ -24,6 +24,17 @@ IMPORT FGL com.fourjs.odatalib.ODataConfig
 CONSTANT DEFAULT_PAGE_SIZE = 200
 CONSTANT MAX_PAGE_SIZE = 1000
 
+# A bound WHERE parameter: the literal value plus the Edm type it must be bound
+# as. The ODI driver binds a parameter with the SQL type of the program variable
+# passed to setParameter(); a STRING bind sends a varchar, which strict engines
+# (Postgres) refuse to compare against numeric / date columns ("operator does not
+# exist: real > character varying"). bindParam() converts the value to the right
+# program type before binding. LIKE patterns are always bound as text.
+PRIVATE TYPE t_bindParam RECORD
+    value STRING,
+    edmType STRING
+END RECORD
+
 #+ Fetch a page of rows for the entity according to the parsed query.
 PUBLIC FUNCTION fetch(
     entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
@@ -31,7 +42,7 @@ PUBLIC FUNCTION fetch(
 
     DEFINE res ODataTypes.T_ODataResult
     DEFINE selProps DYNAMIC ARRAY OF STRING
-    DEFINE params DYNAMIC ARRAY OF STRING
+    DEFINE params DYNAMIC ARRAY OF t_bindParam
     DEFINE selectClause, whereClause, orderClause, sql STRING
     DEFINE pageSize, effLimit, pos, i, fetched INTEGER
     DEFINE sqlObj base.SqlHandle
@@ -78,7 +89,7 @@ PUBLIC FUNCTION fetch(
         LET sqlObj = base.SqlHandle.create()
         CALL sqlObj.prepare(sql)
         FOR i = 1 TO params.getLength()
-            CALL sqlObj.setParameter(i, params[i])
+            CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
         END FOR
         CALL sqlObj.openScrollCursor()
 
@@ -200,12 +211,14 @@ END FUNCTION
 # Returns: " WHERE ..." clause (or ""), bound parameter values, ok, error.
 PRIVATE FUNCTION buildWhere(
     entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
-    RETURNS (STRING, DYNAMIC ARRAY OF STRING, BOOLEAN, STRING)
-    DEFINE params DYNAMIC ARRAY OF STRING
+    RETURNS (STRING, DYNAMIC ARRAY OF t_bindParam, BOOLEAN, STRING)
+    DEFINE params DYNAMIC ARRAY OF t_bindParam
     DEFINE buf base.StringBuffer
-    DEFINE i INTEGER
-    DEFINE col, sqlOp, boundVal STRING
+    DEFINE i, n INTEGER
+    DEFINE col, sqlOp, boundVal, bindType, vmsg STRING
     DEFINE flt ODataTypes.T_ODataFilter
+    DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE found, vok, isLike BOOLEAN
 
     IF query.filters.getLength() == 0 THEN
         RETURN "", params, TRUE, NULL
@@ -216,13 +229,24 @@ PRIVATE FUNCTION buildWhere(
 
     FOR i = 1 TO query.filters.getLength()
         LET flt.* = query.filters[i].*
-        LET col = ODataConfig.columnFor(entity, flt.property)
-        IF col IS NULL THEN
+        CALL ODataConfig.findProperty(entity, flt.property)
+            RETURNING prop.*, found
+        IF NOT found THEN
             RETURN NULL, params,
                 FALSE, SFMT("Unknown property '%1' in $filter", flt.property)
         END IF
+        LET col = prop.column
+        IF col IS NULL OR col.getLength() == 0 THEN
+            LET col = prop.name
+        END IF
 
         LET boundVal = flt.value
+        # Comparisons bind as the column's declared Edm type so the driver sends
+        # a correctly-typed SQL parameter; LIKE patterns are always textual. For
+        # the string functions the user value is wildcard-escaped (%, _, \) so it
+        # is matched literally — only the framework's own %/_ act as wildcards.
+        LET bindType = prop.edmType
+        LET isLike = FALSE
         CASE flt.operator
             WHEN "eq" LET sqlOp = "="
             WHEN "ne" LET sqlOp = "<>"
@@ -231,21 +255,39 @@ PRIVATE FUNCTION buildWhere(
             WHEN "ge" LET sqlOp = ">="
             WHEN "le" LET sqlOp = "<="
             WHEN "contains"
-                LET sqlOp = "LIKE"
-                LET boundVal = SFMT("%%%1%%", flt.value)
+                LET isLike = TRUE
+                LET boundVal = SFMT("%%%1%%", escapeLike(flt.value))
+                LET bindType = "Edm.String"
             WHEN "startswith"
-                LET sqlOp = "LIKE"
-                LET boundVal = SFMT("%1%%", flt.value)
+                LET isLike = TRUE
+                LET boundVal = SFMT("%1%%", escapeLike(flt.value))
+                LET bindType = "Edm.String"
             WHEN "endswith"
-                LET sqlOp = "LIKE"
-                LET boundVal = SFMT("%%%1", flt.value)
+                LET isLike = TRUE
+                LET boundVal = SFMT("%%%1", escapeLike(flt.value))
+                LET bindType = "Edm.String"
             OTHERWISE
                 RETURN NULL, params,
                     FALSE, SFMT("Unsupported operator '%1'", flt.operator)
         END CASE
 
-        CALL buf.append(SFMT("(%1 %2 ?)", col, sqlOp))
-        LET params[params.getLength() + 1] = boundVal
+        # Reject a literal that does not match its column type as a clean 400,
+        # rather than letting the database raise a 500-level bind error.
+        CALL validateLiteral(bindType, boundVal) RETURNING vok, vmsg
+        IF NOT vok THEN
+            RETURN NULL, params, FALSE, vmsg
+        END IF
+
+        IF isLike THEN
+            # Backslash escape char (doubled in the BDL literal); standard SQL,
+            # honoured by Postgres/Informix/Oracle/SQL Server/MySQL.
+            CALL buf.append(SFMT("(%1 LIKE ? ESCAPE '\\')", col))
+        ELSE
+            CALL buf.append(SFMT("(%1 %2 ?)", col, sqlOp))
+        END IF
+        LET n = params.getLength() + 1
+        LET params[n].value = boundVal
+        LET params[n].edmType = bindType
 
         IF flt.conjunction == "and" THEN
             CALL buf.append(" AND ")
@@ -294,7 +336,7 @@ END FUNCTION
 PRIVATE FUNCTION countRows(
     entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
     RETURNS (INTEGER, BOOLEAN, STRING)
-    DEFINE params DYNAMIC ARRAY OF STRING
+    DEFINE params DYNAMIC ARRAY OF t_bindParam
     DEFINE whereClause, sql, dummy STRING
     DEFINE ok BOOLEAN
     DEFINE i, cnt INTEGER
@@ -310,7 +352,7 @@ PRIVATE FUNCTION countRows(
         LET sqlObj = base.SqlHandle.create()
         CALL sqlObj.prepare(sql)
         FOR i = 1 TO params.getLength()
-            CALL sqlObj.setParameter(i, params[i])
+            CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
         END FOR
         CALL sqlObj.open()
         CALL sqlObj.fetch()
@@ -325,4 +367,199 @@ PRIVATE FUNCTION countRows(
     END TRY
 
     RETURN cnt, TRUE, NULL
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# Type-aware parameter binding
+# ---------------------------------------------------------------------------
+
+#+ Bind a WHERE parameter using the program-variable type implied by its Edm
+#+ type, so the ODI driver sends a correctly-typed SQL parameter. Textual and
+#+ unhandled Edm types fall back to a string bind (the prior behaviour). Values
+#+ are assumed already validated by validateLiteral().
+PRIVATE FUNCTION bindParam(
+    sqlObj base.SqlHandle, idx INTEGER, edmType STRING, val STRING)
+    DEFINE iv INTEGER
+    DEFINE bv BIGINT
+    DEFINE fv FLOAT
+    DEFINE dv DECIMAL
+    DEFINE dt DATE
+
+    CASE edmType
+        WHEN "Edm.Int16"
+            LET iv = val
+            CALL sqlObj.setParameter(idx, iv)
+        WHEN "Edm.Int32"
+            LET iv = val
+            CALL sqlObj.setParameter(idx, iv)
+        WHEN "Edm.Byte"
+            LET iv = val
+            CALL sqlObj.setParameter(idx, iv)
+        WHEN "Edm.SByte"
+            LET iv = val
+            CALL sqlObj.setParameter(idx, iv)
+        WHEN "Edm.Int64"
+            LET bv = val
+            CALL sqlObj.setParameter(idx, bv)
+        WHEN "Edm.Single"
+            LET fv = val
+            CALL sqlObj.setParameter(idx, fv)
+        WHEN "Edm.Double"
+            LET fv = val
+            CALL sqlObj.setParameter(idx, fv)
+        WHEN "Edm.Decimal"
+            LET dv = val
+            CALL sqlObj.setParameter(idx, dv)
+        WHEN "Edm.Date"
+            LET dt = isoToDate(val)
+            CALL sqlObj.setParameter(idx, dt)
+        OTHERWISE
+            # Edm.String, Edm.Boolean, Edm.Guid, Edm.DateTimeOffset, unknown
+            CALL sqlObj.setParameter(idx, val)
+    END CASE
+END FUNCTION
+
+#+ Validate an OData literal against the Edm type it will be bound as. Returns
+#+ (TRUE, NULL) when acceptable, else (FALSE, <BadRequest message>).
+PRIVATE FUNCTION validateLiteral(edmType STRING, val STRING)
+    RETURNS (BOOLEAN, STRING)
+    CASE edmType
+        WHEN "Edm.Int16"
+            IF NOT isIntLiteral(val) THEN RETURN FALSE, badLiteral(val, "integer") END IF
+        WHEN "Edm.Int32"
+            IF NOT isIntLiteral(val) THEN RETURN FALSE, badLiteral(val, "integer") END IF
+        WHEN "Edm.Int64"
+            IF NOT isIntLiteral(val) THEN RETURN FALSE, badLiteral(val, "integer") END IF
+        WHEN "Edm.Byte"
+            IF NOT isIntLiteral(val) THEN RETURN FALSE, badLiteral(val, "integer") END IF
+        WHEN "Edm.SByte"
+            IF NOT isIntLiteral(val) THEN RETURN FALSE, badLiteral(val, "integer") END IF
+        WHEN "Edm.Single"
+            IF NOT isDecimalLiteral(val) THEN RETURN FALSE, badLiteral(val, "number") END IF
+        WHEN "Edm.Double"
+            IF NOT isDecimalLiteral(val) THEN RETURN FALSE, badLiteral(val, "number") END IF
+        WHEN "Edm.Decimal"
+            IF NOT isDecimalLiteral(val) THEN RETURN FALSE, badLiteral(val, "number") END IF
+        WHEN "Edm.Date"
+            IF NOT isIsoDate(val) THEN RETURN FALSE, badLiteral(val, "date (yyyy-mm-dd)") END IF
+        OTHERWISE
+            # textual / unvalidated types pass through
+    END CASE
+    RETURN TRUE, NULL
+END FUNCTION
+
+PRIVATE FUNCTION badLiteral(val STRING, want STRING) RETURNS STRING
+    RETURN SFMT("Invalid %1 value '%2' in $filter", want, val)
+END FUNCTION
+
+#+ TRUE for an optionally-signed run of decimal digits, e.g. "42" or "-7".
+PRIVATE FUNCTION isIntLiteral(s STRING) RETURNS BOOLEAN
+    DEFINE i, start INTEGER
+    DEFINE c STRING
+    IF s IS NULL OR s.getLength() == 0 THEN
+        RETURN FALSE
+    END IF
+    LET start = 1
+    IF s.getCharAt(1) == "-" OR s.getCharAt(1) == "+" THEN
+        LET start = 2
+    END IF
+    IF start > s.getLength() THEN
+        RETURN FALSE
+    END IF
+    FOR i = start TO s.getLength()
+        LET c = s.getCharAt(i)
+        IF c < "0" OR c > "9" THEN
+            RETURN FALSE
+        END IF
+    END FOR
+    RETURN TRUE
+END FUNCTION
+
+#+ TRUE for a decimal / floating literal: optional sign, digits, optional single
+#+ '.', optional exponent (e/E with optional sign). Must hold at least one digit.
+PRIVATE FUNCTION isDecimalLiteral(s STRING) RETURNS BOOLEAN
+    DEFINE i, n, digits INTEGER
+    DEFINE c STRING
+    DEFINE seenDot, seenExp BOOLEAN
+
+    IF s IS NULL OR s.getLength() == 0 THEN
+        RETURN FALSE
+    END IF
+    LET n = s.getLength()
+    LET i = 1
+    IF s.getCharAt(1) == "-" OR s.getCharAt(1) == "+" THEN
+        LET i = 2
+    END IF
+    LET digits = 0
+    WHILE i <= n
+        LET c = s.getCharAt(i)
+        CASE
+            WHEN c >= "0" AND c <= "9"
+                LET digits = digits + 1
+            WHEN c == "."
+                IF seenDot OR seenExp THEN RETURN FALSE END IF
+                LET seenDot = TRUE
+            WHEN c == "e" OR c == "E"
+                IF seenExp OR digits == 0 THEN RETURN FALSE END IF
+                LET seenExp = TRUE
+                LET digits = 0
+                # an optional sign may immediately follow the exponent marker
+                IF i < n AND (s.getCharAt(i + 1) == "-"
+                    OR s.getCharAt(i + 1) == "+") THEN
+                    LET i = i + 1
+                END IF
+            OTHERWISE
+                RETURN FALSE
+        END CASE
+        LET i = i + 1
+    END WHILE
+    RETURN digits > 0
+END FUNCTION
+
+#+ TRUE for a strict ISO date literal "yyyy-mm-dd" (the OData Edm.Date form).
+PRIVATE FUNCTION isIsoDate(s STRING) RETURNS BOOLEAN
+    DEFINE i INTEGER
+    DEFINE c STRING
+    IF s IS NULL OR s.getLength() != 10 THEN
+        RETURN FALSE
+    END IF
+    IF s.getCharAt(5) != "-" OR s.getCharAt(8) != "-" THEN
+        RETURN FALSE
+    END IF
+    FOR i = 1 TO 10
+        IF i == 5 OR i == 8 THEN CONTINUE FOR END IF
+        LET c = s.getCharAt(i)
+        IF c < "0" OR c > "9" THEN
+            RETURN FALSE
+        END IF
+    END FOR
+    RETURN TRUE
+END FUNCTION
+
+#+ Convert a validated "yyyy-mm-dd" literal to a DATE without depending on the
+#+ runtime date format (MDY takes month, day, year).
+PRIVATE FUNCTION isoToDate(s STRING) RETURNS DATE
+    RETURN MDY(s.subString(6, 7), s.subString(9, 10), s.subString(1, 4))
+END FUNCTION
+
+#+ Escape the LIKE wildcard metacharacters (\, %, _) in a user-supplied
+#+ contains/startswith/endswith value so they match literally. Paired with an
+#+ ESCAPE '\' clause on the LIKE predicate. Done char-by-char (not replaceAll,
+#+ which is regex-based and would mishandle the backslash).
+PRIVATE FUNCTION escapeLike(s STRING) RETURNS STRING
+    DEFINE buf base.StringBuffer
+    DEFINE i INTEGER
+    DEFINE c STRING
+    IF s IS NULL THEN
+        RETURN s
+    END IF
+    LET buf = base.StringBuffer.create()
+    FOR i = 1 TO s.getLength()
+        LET c = s.getCharAt(i)
+        IF c == "\\" OR c == "%" OR c == "_" THEN
+            CALL buf.append("\\")
+        END IF
+        CALL buf.append(c)
+    END FOR
+    RETURN buf.toString()
 END FUNCTION
