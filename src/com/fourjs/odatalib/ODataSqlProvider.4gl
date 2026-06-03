@@ -42,11 +42,14 @@ PUBLIC FUNCTION fetch(
 
     DEFINE res ODataTypes.T_ODataResult
     DEFINE selProps DYNAMIC ARRAY OF STRING
+    DEFINE selEdm DYNAMIC ARRAY OF STRING
     DEFINE params DYNAMIC ARRAY OF t_bindParam
     DEFINE selectClause, whereClause, orderClause, sql STRING
     DEFINE pageSize, effLimit, pos, i, fetched INTEGER
     DEFINE sqlObj base.SqlHandle
     DEFINE rowObj util.JSONObject
+    DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE found BOOLEAN
 
     LET res.ok = TRUE
     LET res.rows = util.JSONArray.create()
@@ -59,6 +62,13 @@ PUBLIC FUNCTION fetch(
         LET res.errorCode = "BadRequest"
         RETURN res
     END IF
+
+    # Resolve the Edm type of each selected column once, so the row loop can
+    # serialise type-sensitive values (Edm.Single) without a per-row lookup.
+    FOR i = 1 TO selProps.getLength()
+        CALL ODataConfig.findProperty(entity, selProps[i]) RETURNING prop.*, found
+        LET selEdm[i] = prop.edmType
+    END FOR
 
     CALL buildWhere(entity, query)
         RETURNING whereClause, params, res.ok, res.errorMessage
@@ -102,7 +112,14 @@ PUBLIC FUNCTION fetch(
             END IF
             LET rowObj = util.JSONObject.create()
             FOR i = 1 TO selProps.getLength()
-                CALL rowObj.put(selProps[i], sqlObj.getResultValue(i))
+                IF selEdm[i] == "Edm.Single" THEN
+                    # Re-narrow the widened float so the wire value keeps single
+                    # precision (a stored 32.38 emits 32.38, not 32.380001…).
+                    CALL rowObj.put(selProps[i],
+                        singleValue(sqlObj.getResultValue(i)))
+                ELSE
+                    CALL rowObj.put(selProps[i], sqlObj.getResultValue(i))
+                END IF
             END FOR
             CALL res.rows.put(res.rows.getLength() + 1, rowObj)
             LET fetched = fetched + 1
@@ -540,6 +557,20 @@ END FUNCTION
 #+ runtime date format (MDY takes month, day, year).
 PRIVATE FUNCTION isoToDate(s STRING) RETURNS DATE
     RETURN MDY(s.subString(6, 7), s.subString(9, 10), s.subString(1, 4))
+END FUNCTION
+
+#+ Narrow a value read from an Edm.Single (4-byte float) column back to single
+#+ precision for serialisation. The driver widens float4 to float8, so a stored
+#+ 32.38 reads as 32.380001068115234; assigning through SMALLFLOAT and its clean
+#+ ~7-significant-digit text form recovers 32.38, and the DECIMAL result puts as
+#+ an unquoted JSON number. NULL passes through as JSON null.
+PRIVATE FUNCTION singleValue(raw SMALLFLOAT) RETURNS DECIMAL
+    DEFINE s STRING
+    IF raw IS NULL THEN
+        RETURN NULL
+    END IF
+    LET s = raw
+    RETURN s
 END FUNCTION
 
 #+ Escape the LIKE wildcard metacharacters (\, %, _) in a user-supplied

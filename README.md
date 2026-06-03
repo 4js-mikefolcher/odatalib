@@ -323,9 +323,6 @@ including Power BI; the body is well-formed CSDL.
 **Known v0 caveats:**
 - `@odata.nextLink` percent-encodes the common OData filter charset; a full
   RFC 3986 encoder is a follow-up.
-- `Edm.Single` (4-byte float) columns serialise with their full binary widening
-  (e.g. a stored `32.38` may emit as `32.380001…`); round-tripping `Edm.Single`
-  at single precision is a follow-up. `Edm.Decimal` columns are unaffected.
 - `$filter` `eq null` binds the literal text `null` rather than translating to
   SQL `IS NULL`; explicit null handling is a follow-up.
 
@@ -340,3 +337,7 @@ including Power BI; the body is well-formed CSDL.
 - *`LIKE` wildcard escaping.* `contains`/`startswith`/`endswith` values are
   escaped (`%`, `_`, `\`) and matched with an `ESCAPE '\'` clause, so user input
   is matched literally instead of acting as SQL wildcards.
+- *`Edm.Single` precision.* 4-byte-float columns are re-narrowed to single
+  precision on serialisation, so a stored `32.38` emits as `32.38`, not
+  `32.380001…` (the float4→float8 widening the driver returns). `Edm.Double`
+  keeps full precision; `Edm.Decimal` is exact and unaffected.
