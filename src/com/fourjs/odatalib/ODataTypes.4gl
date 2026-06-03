@@ -53,6 +53,7 @@ PUBLIC TYPE T_ODataFilter RECORD
     property STRING,
     operator STRING,        # eq ne gt lt ge le contains startswith endswith
     value STRING,
+    isNull BOOLEAN,         # TRUE when the literal was the bare keyword null
     conjunction STRING      # and | or | "" (trailing)
 END RECORD
 

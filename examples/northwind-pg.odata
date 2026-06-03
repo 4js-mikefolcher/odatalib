@@ -14,6 +14,7 @@
         { "name": "CompanyName",  "column": "companyname",  "type": "Edm.String" },
         { "name": "ContactName",  "column": "contactname",  "type": "Edm.String" },
         { "name": "City",         "column": "city",         "type": "Edm.String" },
+        { "name": "Region",       "column": "region",       "type": "Edm.String" },
         { "name": "Country",      "column": "country",      "type": "Edm.String" },
         { "name": "Phone",        "column": "phone",        "type": "Edm.String" }
       ]

@@ -231,6 +231,13 @@ PRIVATE FUNCTION readPredicate(
     END CASE
     LET f.property = m_tokens[pos]
     LET f.operator = op
+    # The bare keyword `null` (unquoted) is the OData null literal; the quoted
+    # string 'null' is a normal text value. Both strip to "null", so flag the
+    # unquoted form here for the SQL layer to translate to IS [NOT] NULL.
+    IF m_tokens[pos + 2].getCharAt(1) != "'"
+        AND m_tokens[pos + 2].toLowerCase() == "null" THEN
+        LET f.isNull = TRUE
+    END IF
     LET f.value = stripQuotes(m_tokens[pos + 2])
     RETURN pos + 3, f.*, TRUE, NULL
 END FUNCTION

@@ -257,54 +257,69 @@ PRIVATE FUNCTION buildWhere(
             LET col = prop.name
         END IF
 
-        LET boundVal = flt.value
-        # Comparisons bind as the column's declared Edm type so the driver sends
-        # a correctly-typed SQL parameter; LIKE patterns are always textual. For
-        # the string functions the user value is wildcard-escaped (%, _, \) so it
-        # is matched literally — only the framework's own %/_ act as wildcards.
-        LET bindType = prop.edmType
-        LET isLike = FALSE
-        CASE flt.operator
-            WHEN "eq" LET sqlOp = "="
-            WHEN "ne" LET sqlOp = "<>"
-            WHEN "gt" LET sqlOp = ">"
-            WHEN "lt" LET sqlOp = "<"
-            WHEN "ge" LET sqlOp = ">="
-            WHEN "le" LET sqlOp = "<="
-            WHEN "contains"
-                LET isLike = TRUE
-                LET boundVal = SFMT("%%%1%%", escapeLike(flt.value))
-                LET bindType = "Edm.String"
-            WHEN "startswith"
-                LET isLike = TRUE
-                LET boundVal = SFMT("%1%%", escapeLike(flt.value))
-                LET bindType = "Edm.String"
-            WHEN "endswith"
-                LET isLike = TRUE
-                LET boundVal = SFMT("%%%1", escapeLike(flt.value))
-                LET bindType = "Edm.String"
-            OTHERWISE
-                RETURN NULL, params,
-                    FALSE, SFMT("Unsupported operator '%1'", flt.operator)
-        END CASE
-
-        # Reject a literal that does not match its column type as a clean 400,
-        # rather than letting the database raise a 500-level bind error.
-        CALL validateLiteral(bindType, boundVal) RETURNING vok, vmsg
-        IF NOT vok THEN
-            RETURN NULL, params, FALSE, vmsg
-        END IF
-
-        IF isLike THEN
-            # Backslash escape char (doubled in the BDL literal); standard SQL,
-            # honoured by Postgres/Informix/Oracle/SQL Server/MySQL.
-            CALL buf.append(SFMT("(%1 LIKE ? ESCAPE '\\')", col))
+        IF flt.isNull THEN
+            # The OData null literal maps to SQL IS [NOT] NULL with no bound
+            # parameter. Relational operators against null are not meaningful, so
+            # restrict it to eq / ne.
+            CASE flt.operator
+                WHEN "eq" CALL buf.append(SFMT("(%1 IS NULL)", col))
+                WHEN "ne" CALL buf.append(SFMT("(%1 IS NOT NULL)", col))
+                OTHERWISE
+                    RETURN NULL, params, FALSE,
+                        SFMT("The null literal is only supported with eq/ne (got '%1')",
+                            flt.operator)
+            END CASE
         ELSE
-            CALL buf.append(SFMT("(%1 %2 ?)", col, sqlOp))
+            LET boundVal = flt.value
+            # Comparisons bind as the column's declared Edm type so the driver
+            # sends a correctly-typed SQL parameter; LIKE patterns are always
+            # textual. For the string functions the user value is wildcard-escaped
+            # (%, _, \) so it is matched literally — only the framework's own %/_
+            # act as wildcards.
+            LET bindType = prop.edmType
+            LET isLike = FALSE
+            CASE flt.operator
+                WHEN "eq" LET sqlOp = "="
+                WHEN "ne" LET sqlOp = "<>"
+                WHEN "gt" LET sqlOp = ">"
+                WHEN "lt" LET sqlOp = "<"
+                WHEN "ge" LET sqlOp = ">="
+                WHEN "le" LET sqlOp = "<="
+                WHEN "contains"
+                    LET isLike = TRUE
+                    LET boundVal = SFMT("%%%1%%", escapeLike(flt.value))
+                    LET bindType = "Edm.String"
+                WHEN "startswith"
+                    LET isLike = TRUE
+                    LET boundVal = SFMT("%1%%", escapeLike(flt.value))
+                    LET bindType = "Edm.String"
+                WHEN "endswith"
+                    LET isLike = TRUE
+                    LET boundVal = SFMT("%%%1", escapeLike(flt.value))
+                    LET bindType = "Edm.String"
+                OTHERWISE
+                    RETURN NULL, params,
+                        FALSE, SFMT("Unsupported operator '%1'", flt.operator)
+            END CASE
+
+            # Reject a literal that does not match its column type as a clean 400,
+            # rather than letting the database raise a 500-level bind error.
+            CALL validateLiteral(bindType, boundVal) RETURNING vok, vmsg
+            IF NOT vok THEN
+                RETURN NULL, params, FALSE, vmsg
+            END IF
+
+            IF isLike THEN
+                # Backslash escape char (doubled in the BDL literal); standard
+                # SQL, honoured by Postgres/Informix/Oracle/SQL Server/MySQL.
+                CALL buf.append(SFMT("(%1 LIKE ? ESCAPE '\\')", col))
+            ELSE
+                CALL buf.append(SFMT("(%1 %2 ?)", col, sqlOp))
+            END IF
+            LET n = params.getLength() + 1
+            LET params[n].value = boundVal
+            LET params[n].edmType = bindType
         END IF
-        LET n = params.getLength() + 1
-        LET params[n].value = boundVal
-        LET params[n].edmType = bindType
 
         IF flt.conjunction == "and" THEN
             CALL buf.append(" AND ")

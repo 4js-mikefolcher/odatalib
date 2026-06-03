@@ -57,7 +57,8 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 ### Supported OData v4 query surface (v0)
 
 - `$filter` — `eq ne gt lt ge le`, and `contains` / `startswith` / `endswith`,
-  combined with flat `and` / `or` (no parentheses or `not` yet)
+  combined with flat `and` / `or` (no parentheses or `not` yet); `eq null` /
+  `ne null` map to SQL `IS NULL` / `IS NOT NULL`
 - `$select` — property projection
 - `$top`, `$skip` — pagination
 - `$orderby` — multi-term, `asc` / `desc`
@@ -323,8 +324,6 @@ including Power BI; the body is well-formed CSDL.
 **Known v0 caveats:**
 - `@odata.nextLink` percent-encodes the common OData filter charset; a full
   RFC 3986 encoder is a follow-up.
-- `$filter` `eq null` binds the literal text `null` rather than translating to
-  SQL `IS NULL`; explicit null handling is a follow-up.
 
 **Recently closed (verified against PostgreSQL Northwind):**
 - *Type-aware filter binding.* `$filter` and key-predicate values are now bound
@@ -341,3 +340,7 @@ including Power BI; the body is well-formed CSDL.
   precision on serialisation, so a stored `32.38` emits as `32.38`, not
   `32.380001…` (the float4→float8 widening the driver returns). `Edm.Double`
   keeps full precision; `Edm.Decimal` is exact and unaffected.
+- *Null literal in `$filter`.* `eq null` / `ne null` now translate to SQL
+  `IS NULL` / `IS NOT NULL` (the bare `null` keyword is distinguished from the
+  quoted text value `'null'`). Relational operators against `null` (`gt`/`lt`/…)
+  return a clean `400`.
