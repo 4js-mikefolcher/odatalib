@@ -26,7 +26,7 @@
 
   <EXECUTION>
     <!-- Resolve the odatalib package and the example modules. -->
-    <ENVIRONMENT_VARIABLE Id="FGLLDPATH" Concat="APPEND">$(odata.project.dir)/src:$(odata.project.dir)/examples</ENVIRONMENT_VARIABLE>
+    <ENVIRONMENT_VARIABLE Id="FGLLDPATH" Concat="APPEND">$(odata.project.dir):$(odata.project.dir)/examples</ENVIRONMENT_VARIABLE>
 
     <!-- Absolute path to the .odata config (the DVM cwd is not the examples dir). -->
     <ENVIRONMENT_VARIABLE Id="ODATA_CONFIG">$(odata.project.dir)/examples/northwind.odata</ENVIRONMENT_VARIABLE>

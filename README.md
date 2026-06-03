@@ -217,11 +217,10 @@ GET /CountrySummary                              -> 200 (public per policy)
 The library compiles against Genero 6.x (developed with `fglcomp 6.00.01`).
 
 ```bash
-# Set the library on the module path
-export FGLLDPATH="$PWD/src:$FGLLDPATH"
+# Set the library on the module path (the package root is the project root)
+export FGLLDPATH="$PWD:$FGLLDPATH"
 
 # Compile the library modules (dependency order)
-cd src
 for m in ODataTypes ODataConfig ODataError ODataAuth ODataSqlProvider \
          ODataFunctionProvider ODataProvider ODataSerializer ODataService; do
   fglcomp -M -Wall com/fourjs/odatalib/$m.4gl
@@ -240,7 +239,7 @@ fglpkg install odatalib # consume it in an application
 A small in-memory (SQLite) Northwind sample lives in `examples/`.
 
 ```bash
-export FGLLDPATH="$PWD/src:$PWD/examples:$FGLLDPATH"
+export FGLLDPATH="$PWD:$PWD/examples:$FGLLDPATH"
 cd examples
 fglcomp -M NorthwindCreate.4gl NorthwindFunctions.4gl NorthwindAuth.4gl \
            SmokeTest.4gl NorthwindService.4gl
@@ -266,7 +265,7 @@ database. `examples/fglprofile` maps the `northwind` connection name to the
 function provider) with the real Postgres column names and `Edm.*` types.
 
 ```bash
-export FGLLDPATH="$PWD/src:$PWD/examples:$FGLLDPATH"
+export FGLLDPATH="$PWD:$PWD/examples:$FGLLDPATH"
 export FGLPROFILE="$PWD/examples/fglprofile"      # northwind -> dbmpgs @ localhost:5432
 cd examples
 fglcomp -M NorthwindFunctions.4gl PgSmokeTest.4gl
