@@ -63,10 +63,32 @@ PUBLIC TYPE T_ODataOrderBy RECORD
     descending BOOLEAN
 END RECORD
 
+# One node of the parsed $filter expression tree. Nodes live in a flat pool
+# (T_ODataQuery.filterNodes) and reference their children by 1-based pool index,
+# so the RECORD need not contain itself (BDL has no recursive types):
+#   kind = "pred"        -> pred holds a comparison / string-function predicate
+#   kind = "and" | "or"  -> left and right are child node indices
+#   kind = "not"         -> left is the (single) child node index, right unused
+# The tree carries operator precedence and parenthesised grouping that the flat
+# `filters` list cannot represent.
+PUBLIC TYPE T_ODataFilterNode RECORD
+    kind STRING,
+    pred T_ODataFilter,
+    left INTEGER,
+    right INTEGER
+END RECORD
+
 # The full parsed set of query options for a collection request.
 PUBLIC TYPE T_ODataQuery RECORD
     selectList DYNAMIC ARRAY OF STRING,
+    # Flat list of every predicate leaf, in parse order. Kept for function
+    # providers (and the key-lookup path) that scan for a specific predicate;
+    # it does NOT carry grouping/precedence — use filterNodes/filterRoot for that.
     filters DYNAMIC ARRAY OF T_ODataFilter,
+    # The authoritative parsed $filter as an expression tree (pool + root index,
+    # 0 when there is no $filter). Carries and/or precedence, parentheses, not.
+    filterNodes DYNAMIC ARRAY OF T_ODataFilterNode,
+    filterRoot INTEGER,
     orderby DYNAMIC ARRAY OF T_ODataOrderBy,
     expand DYNAMIC ARRAY OF STRING,
     top INTEGER,

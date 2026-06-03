@@ -57,8 +57,9 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 ### Supported OData v4 query surface (v0)
 
 - `$filter` — `eq ne gt lt ge le`, and `contains` / `startswith` / `endswith`,
-  combined with flat `and` / `or` (no parentheses or `not` yet); `eq null` /
-  `ne null` map to SQL `IS NULL` / `IS NOT NULL`
+  combined with `and` / `or` / `not` and parenthesised grouping, with correct
+  `not` > `and` > `or` precedence; `eq null` / `ne null` map to SQL `IS NULL` /
+  `IS NOT NULL`
 - `$select` — property projection
 - `$top`, `$skip` — pagination
 - `$orderby` — multi-term, `asc` / `desc`
@@ -316,8 +317,8 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- `$expand` materialisation, parenthesised / `not` `$filter`, `$batch`,
-  `$apply`, lambda operators, delta/change-tracking, actions/functions
+- `$expand` materialisation, `$batch`, `$apply`, lambda operators (`any`/`all`),
+  delta/change-tracking, actions/functions
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
@@ -344,3 +345,8 @@ including Power BI; the body is well-formed CSDL.
   `IS NULL` / `IS NOT NULL` (the bare `null` keyword is distinguished from the
   quoted text value `'null'`). Relational operators against `null` (`gt`/`lt`/…)
   return a clean `400`.
+- *Parenthesised / `not` `$filter`.* `$filter` is now parsed into an expression
+  tree by a recursive-descent parser, so grouping with parentheses, the `not`
+  operator, and correct `not` > `and` > `or` precedence are all supported (e.g.
+  `(Country eq 'Germany' or Country eq 'France') and not contains(City,'a')`).
+  Unbalanced parentheses return a clean `400`.

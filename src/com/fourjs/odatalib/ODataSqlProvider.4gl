@@ -35,6 +35,15 @@ PRIVATE TYPE t_bindParam RECORD
     edmType STRING
 END RECORD
 
+# Scratch state for the WHERE-clause builders. A predicate appends its SQL to
+# m_whereBuf and its bound value(s) to m_whereParams in the same order, so the
+# recursive tree walk keeps the `?` placeholders and the parameters aligned.
+# One request is built at a time (the web service engine is single-threaded per
+# request), so module-level scratch is safe and avoids by-reference assumptions.
+PRIVATE DEFINE m_whereBuf base.StringBuffer
+PRIVATE DEFINE m_whereParams DYNAMIC ARRAY OF t_bindParam
+PRIVATE DEFINE m_whereErr STRING
+
 #+ Fetch a page of rows for the entity according to the parsed query.
 PUBLIC FUNCTION fetch(
     entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
@@ -226,111 +235,193 @@ PRIVATE FUNCTION buildSelect(
 END FUNCTION
 
 # Returns: " WHERE ..." clause (or ""), bound parameter values, ok, error.
+# Dispatches to the expression-tree builder when the parser produced one
+# (any user $filter), else the flat builder (the key-lookup path, which sets
+# query.filters directly without a tree).
 PRIVATE FUNCTION buildWhere(
     entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
     RETURNS (STRING, DYNAMIC ARRAY OF t_bindParam, BOOLEAN, STRING)
+    DEFINE clause, err STRING
     DEFINE params DYNAMIC ARRAY OF t_bindParam
-    DEFINE buf base.StringBuffer
-    DEFINE i, n INTEGER
-    DEFINE col, sqlOp, boundVal, bindType, vmsg STRING
+    DEFINE ok BOOLEAN
+    IF query.filterRoot > 0 THEN
+        CALL buildWhereTree(entity, query) RETURNING clause, params, ok, err
+    ELSE
+        CALL buildWhereFlat(entity, query) RETURNING clause, params, ok, err
+    END IF
+    RETURN clause, params, ok, err
+END FUNCTION
+
+# Tree builder: walk the parsed expression tree, emitting parenthesised SQL with
+# AND / OR / NOT and binding parameters in placeholder order.
+PRIVATE FUNCTION buildWhereTree(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (STRING, DYNAMIC ARRAY OF t_bindParam, BOOLEAN, STRING)
+    LET m_whereBuf = base.StringBuffer.create()
+    CALL m_whereParams.clear()
+    LET m_whereErr = NULL
+
+    CALL m_whereBuf.append(" WHERE ")
+    CALL buildNode(entity, query, query.filterRoot)
+    IF m_whereErr IS NOT NULL THEN
+        RETURN NULL, m_whereParams, FALSE, m_whereErr
+    END IF
+    RETURN m_whereBuf.toString(), m_whereParams, TRUE, NULL
+END FUNCTION
+
+# Recursively emit one node of the filter tree into m_whereBuf / m_whereParams.
+# Stops descending once m_whereErr is set.
+PRIVATE FUNCTION buildNode(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery,
+    idx INTEGER)
+    DEFINE node ODataTypes.T_ODataFilterNode
+    IF m_whereErr IS NOT NULL THEN
+        RETURN
+    END IF
+    LET node.* = query.filterNodes[idx].*
+    CASE node.kind
+        WHEN "pred"
+            CALL appendPredicate(entity, node.pred.*)
+        WHEN "not"
+            CALL m_whereBuf.append("(NOT ")
+            CALL buildNode(entity, query, node.left)
+            CALL m_whereBuf.append(")")
+        WHEN "and"
+            CALL m_whereBuf.append("(")
+            CALL buildNode(entity, query, node.left)
+            CALL m_whereBuf.append(" AND ")
+            CALL buildNode(entity, query, node.right)
+            CALL m_whereBuf.append(")")
+        WHEN "or"
+            CALL m_whereBuf.append("(")
+            CALL buildNode(entity, query, node.left)
+            CALL m_whereBuf.append(" OR ")
+            CALL buildNode(entity, query, node.right)
+            CALL m_whereBuf.append(")")
+        OTHERWISE
+            LET m_whereErr = SFMT("Internal: unknown filter node kind '%1'",
+                node.kind)
+    END CASE
+END FUNCTION
+
+# Flat builder: predicates joined left-to-right by their conjunction field. Used
+# by the key-lookup path (a single eq predicate, no tree).
+PRIVATE FUNCTION buildWhereFlat(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (STRING, DYNAMIC ARRAY OF t_bindParam, BOOLEAN, STRING)
+    DEFINE i INTEGER
     DEFINE flt ODataTypes.T_ODataFilter
-    DEFINE prop ODataTypes.T_ODataProperty
-    DEFINE found, vok, isLike BOOLEAN
+
+    LET m_whereBuf = base.StringBuffer.create()
+    CALL m_whereParams.clear()
+    LET m_whereErr = NULL
 
     IF query.filters.getLength() == 0 THEN
-        RETURN "", params, TRUE, NULL
+        RETURN "", m_whereParams, TRUE, NULL
     END IF
 
-    LET buf = base.StringBuffer.create()
-    CALL buf.append(" WHERE ")
-
+    CALL m_whereBuf.append(" WHERE ")
     FOR i = 1 TO query.filters.getLength()
         LET flt.* = query.filters[i].*
-        CALL ODataConfig.findProperty(entity, flt.property)
-            RETURNING prop.*, found
-        IF NOT found THEN
-            RETURN NULL, params,
-                FALSE, SFMT("Unknown property '%1' in $filter", flt.property)
+        CALL appendPredicate(entity, flt.*)
+        IF m_whereErr IS NOT NULL THEN
+            RETURN NULL, m_whereParams, FALSE, m_whereErr
         END IF
-        LET col = prop.column
-        IF col IS NULL OR col.getLength() == 0 THEN
-            LET col = prop.name
-        END IF
-
-        IF flt.isNull THEN
-            # The OData null literal maps to SQL IS [NOT] NULL with no bound
-            # parameter. Relational operators against null are not meaningful, so
-            # restrict it to eq / ne.
-            CASE flt.operator
-                WHEN "eq" CALL buf.append(SFMT("(%1 IS NULL)", col))
-                WHEN "ne" CALL buf.append(SFMT("(%1 IS NOT NULL)", col))
-                OTHERWISE
-                    RETURN NULL, params, FALSE,
-                        SFMT("The null literal is only supported with eq/ne (got '%1')",
-                            flt.operator)
-            END CASE
-        ELSE
-            LET boundVal = flt.value
-            # Comparisons bind as the column's declared Edm type so the driver
-            # sends a correctly-typed SQL parameter; LIKE patterns are always
-            # textual. For the string functions the user value is wildcard-escaped
-            # (%, _, \) so it is matched literally — only the framework's own %/_
-            # act as wildcards.
-            LET bindType = prop.edmType
-            LET isLike = FALSE
-            CASE flt.operator
-                WHEN "eq" LET sqlOp = "="
-                WHEN "ne" LET sqlOp = "<>"
-                WHEN "gt" LET sqlOp = ">"
-                WHEN "lt" LET sqlOp = "<"
-                WHEN "ge" LET sqlOp = ">="
-                WHEN "le" LET sqlOp = "<="
-                WHEN "contains"
-                    LET isLike = TRUE
-                    LET boundVal = SFMT("%%%1%%", escapeLike(flt.value))
-                    LET bindType = "Edm.String"
-                WHEN "startswith"
-                    LET isLike = TRUE
-                    LET boundVal = SFMT("%1%%", escapeLike(flt.value))
-                    LET bindType = "Edm.String"
-                WHEN "endswith"
-                    LET isLike = TRUE
-                    LET boundVal = SFMT("%%%1", escapeLike(flt.value))
-                    LET bindType = "Edm.String"
-                OTHERWISE
-                    RETURN NULL, params,
-                        FALSE, SFMT("Unsupported operator '%1'", flt.operator)
-            END CASE
-
-            # Reject a literal that does not match its column type as a clean 400,
-            # rather than letting the database raise a 500-level bind error.
-            CALL validateLiteral(bindType, boundVal) RETURNING vok, vmsg
-            IF NOT vok THEN
-                RETURN NULL, params, FALSE, vmsg
-            END IF
-
-            IF isLike THEN
-                # Backslash escape char (doubled in the BDL literal); standard
-                # SQL, honoured by Postgres/Informix/Oracle/SQL Server/MySQL.
-                CALL buf.append(SFMT("(%1 LIKE ? ESCAPE '\\')", col))
-            ELSE
-                CALL buf.append(SFMT("(%1 %2 ?)", col, sqlOp))
-            END IF
-            LET n = params.getLength() + 1
-            LET params[n].value = boundVal
-            LET params[n].edmType = bindType
-        END IF
-
         IF flt.conjunction == "and" THEN
-            CALL buf.append(" AND ")
+            CALL m_whereBuf.append(" AND ")
         ELSE
             IF flt.conjunction == "or" THEN
-                CALL buf.append(" OR ")
+                CALL m_whereBuf.append(" OR ")
             END IF
         END IF
     END FOR
+    RETURN m_whereBuf.toString(), m_whereParams, TRUE, NULL
+END FUNCTION
 
-    RETURN buf.toString(), params, TRUE, NULL
+# Emit a single predicate fragment "(col op ?)" / "(col IS [NOT] NULL)" / a LIKE
+# clause into m_whereBuf, appending its bound parameter (if any) to m_whereParams.
+# Sets m_whereErr on an unknown property / unsupported operator / bad literal.
+PRIVATE FUNCTION appendPredicate(
+    entity ODataTypes.T_ODataEntity, flt ODataTypes.T_ODataFilter)
+    DEFINE col, sqlOp, boundVal, bindType, vmsg STRING
+    DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE found, vok, isLike BOOLEAN
+    DEFINE n INTEGER
+
+    CALL ODataConfig.findProperty(entity, flt.property) RETURNING prop.*, found
+    IF NOT found THEN
+        LET m_whereErr = SFMT("Unknown property '%1' in $filter", flt.property)
+        RETURN
+    END IF
+    LET col = prop.column
+    IF col IS NULL OR col.getLength() == 0 THEN
+        LET col = prop.name
+    END IF
+
+    IF flt.isNull THEN
+        # The OData null literal maps to SQL IS [NOT] NULL with no bound
+        # parameter. Relational operators against null are not meaningful, so
+        # restrict it to eq / ne.
+        CASE flt.operator
+            WHEN "eq" CALL m_whereBuf.append(SFMT("(%1 IS NULL)", col))
+            WHEN "ne" CALL m_whereBuf.append(SFMT("(%1 IS NOT NULL)", col))
+            OTHERWISE
+                LET m_whereErr =
+                    SFMT("The null literal is only supported with eq/ne (got '%1')",
+                        flt.operator)
+        END CASE
+        RETURN
+    END IF
+
+    LET boundVal = flt.value
+    # Comparisons bind as the column's declared Edm type so the driver sends a
+    # correctly-typed SQL parameter; LIKE patterns are always textual. For the
+    # string functions the user value is wildcard-escaped (%, _, \) so it is
+    # matched literally — only the framework's own %/_ act as wildcards.
+    LET bindType = prop.edmType
+    LET isLike = FALSE
+    CASE flt.operator
+        WHEN "eq" LET sqlOp = "="
+        WHEN "ne" LET sqlOp = "<>"
+        WHEN "gt" LET sqlOp = ">"
+        WHEN "lt" LET sqlOp = "<"
+        WHEN "ge" LET sqlOp = ">="
+        WHEN "le" LET sqlOp = "<="
+        WHEN "contains"
+            LET isLike = TRUE
+            LET boundVal = SFMT("%%%1%%", escapeLike(flt.value))
+            LET bindType = "Edm.String"
+        WHEN "startswith"
+            LET isLike = TRUE
+            LET boundVal = SFMT("%1%%", escapeLike(flt.value))
+            LET bindType = "Edm.String"
+        WHEN "endswith"
+            LET isLike = TRUE
+            LET boundVal = SFMT("%%%1", escapeLike(flt.value))
+            LET bindType = "Edm.String"
+        OTHERWISE
+            LET m_whereErr = SFMT("Unsupported operator '%1'", flt.operator)
+            RETURN
+    END CASE
+
+    # Reject a literal that does not match its column type as a clean 400,
+    # rather than letting the database raise a 500-level bind error.
+    CALL validateLiteral(bindType, boundVal) RETURNING vok, vmsg
+    IF NOT vok THEN
+        LET m_whereErr = vmsg
+        RETURN
+    END IF
+
+    IF isLike THEN
+        # Backslash escape char (doubled in the BDL literal); standard SQL,
+        # honoured by Postgres/Informix/Oracle/SQL Server/MySQL.
+        CALL m_whereBuf.append(SFMT("(%1 LIKE ? ESCAPE '\\')", col))
+    ELSE
+        CALL m_whereBuf.append(SFMT("(%1 %2 ?)", col, sqlOp))
+    END IF
+    LET n = m_whereParams.getLength() + 1
+    LET m_whereParams[n].value = boundVal
+    LET m_whereParams[n].edmType = bindType
 END FUNCTION
 
 # Returns: " ORDER BY ..." clause (or ""), ok, error.

@@ -26,8 +26,12 @@ PACKAGE com.fourjs.odatalib
 
 IMPORT FGL com.fourjs.odatalib.ODataTypes
 
-# Scratch token buffer for the $filter tokeniser (module-private).
+# Scratch state for the $filter tokeniser + recursive-descent parser (module-
+# private; one request is parsed at a time).
 PRIVATE DEFINE m_tokens DYNAMIC ARRAY OF STRING
+PRIVATE DEFINE m_tpos INTEGER                                  # parser cursor
+PRIVATE DEFINE m_nodes DYNAMIC ARRAY OF ODataTypes.T_ODataFilterNode
+PRIVATE DEFINE m_perr STRING                                   # parse error (NULL = ok)
 
 #+ Parse the supported query options into a normalised T_ODataQuery.
 #+ Any argument may be NULL (option absent).
@@ -131,93 +135,164 @@ PRIVATE FUNCTION parseOrderBy(
 END FUNCTION
 
 # ---------------------------------------------------------------------------
-# $filter
+# $filter — recursive-descent parser building an expression tree.
+#
+# Grammar (lowest to highest precedence), matching OData v4:
+#     orExpr   := andExpr ( 'or'  andExpr )*
+#     andExpr  := notExpr ( 'and' notExpr )*
+#     notExpr  := 'not' notExpr | primary
+#     primary  := '(' orExpr ')' | comparison | function
+#     comparison := property ('eq'|'ne'|'gt'|'lt'|'ge'|'le') literal
+#     function   := ('contains'|'startswith'|'endswith') '(' property ',' literal ')'
+#
+# Output: q.filterNodes (flat node pool) + q.filterRoot (root index). The flat
+# q.filters leaf list is also populated for legacy consumers (function providers).
 # ---------------------------------------------------------------------------
 PRIVATE FUNCTION parseFilter(
     s STRING, q ODataTypes.T_ODataQuery)
     RETURNS ODataTypes.T_ODataQuery
-    DEFINE pos, n INTEGER
-    DEFINE f ODataTypes.T_ODataFilter
-    DEFINE nextTok, low STRING
+    DEFINE root, i INTEGER
 
     CALL tokenize(s)
+    CALL m_nodes.clear()
+    LET m_tpos = 1
+    LET m_perr = NULL
 
-    # Reject grouping / negation we do not support yet.
-    IF containsToken("(") AND NOT isFunctionForm() THEN
-        CALL setErr(q, "NotImplemented",
-            "Parenthesised $filter expressions are not supported in v0")
-            RETURNING q
-        RETURN q
-    END IF
-    IF containsToken("not") THEN
-        CALL setErr(q, "NotImplemented",
-            "The 'not' operator is not supported in $filter in v0")
-            RETURNING q
-        RETURN q
+    IF m_tokens.getLength() == 0 THEN
+        RETURN q                               # empty / whitespace $filter: no-op
     END IF
 
-    LET pos = 1
-    WHILE pos <= m_tokens.getLength()
-        INITIALIZE f.* TO NULL
-        CALL readPredicate(pos, f) RETURNING pos, f.*, q.ok, q.errorMessage
-        IF NOT q.ok THEN
-            LET q.errorCode = "BadRequest"
-            RETURN q
+    LET root = parseOr()
+    IF m_perr IS NOT NULL THEN
+        CALL setErr(q, "BadRequest", m_perr) RETURNING q
+        RETURN q
+    END IF
+    IF m_tpos <= m_tokens.getLength() THEN
+        CALL setErr(q, "BadRequest",
+            SFMT("Unexpected '%1' in $filter", m_tokens[m_tpos])) RETURNING q
+        RETURN q
+    END IF
+
+    FOR i = 1 TO m_nodes.getLength()
+        LET q.filterNodes[i].* = m_nodes[i].*
+    END FOR
+    LET q.filterRoot = root
+
+    # Flat leaf list for function providers / key-lookup scanning. Pool order is
+    # left-to-right parse order; grouping/precedence lives in the tree.
+    FOR i = 1 TO m_nodes.getLength()
+        IF m_nodes[i].kind == "pred" THEN
+            LET q.filters[q.filters.getLength() + 1].* = m_nodes[i].pred.*
         END IF
-        # logical operator joining to the next predicate?
-        IF pos <= m_tokens.getLength() THEN
-            LET nextTok = m_tokens[pos]
-            LET low = nextTok.toLowerCase()
-            IF low == "and" OR low == "or" THEN
-                LET f.conjunction = low
-                LET pos = pos + 1
-            ELSE
-                CALL setErr(q, "BadRequest",
-                    SFMT("Expected 'and'/'or' in $filter, found '%1'", nextTok))
-                    RETURNING q
-                RETURN q
-            END IF
-        ELSE
-            LET f.conjunction = ""
-        END IF
-        LET n = q.filters.getLength() + 1
-        LET q.filters[n].* = f.*
-    END WHILE
+    END FOR
     RETURN q
 END FUNCTION
 
-# Read a single predicate starting at token position `pos`.
-# Returns the new position, the filled filter, an ok flag and an error message.
-PRIVATE FUNCTION readPredicate(
-    pos INTEGER, f ODataTypes.T_ODataFilter)
-    RETURNS (INTEGER, ODataTypes.T_ODataFilter, BOOLEAN, STRING)
-    DEFINE fn, op STRING
-
-    IF pos > m_tokens.getLength() THEN
-        RETURN pos, f.*, FALSE, "Unexpected end of $filter"
+# Lower-cased current token, or NULL past the end. Guards the index: BDL `AND`
+# does not short-circuit and indexing a DYNAMIC ARRAY past its length silently
+# grows it, so the bound MUST be checked before subscripting m_tokens.
+PRIVATE FUNCTION peekLower() RETURNS STRING
+    IF m_tpos > m_tokens.getLength() THEN
+        RETURN NULL
     END IF
+    RETURN m_tokens[m_tpos].toLowerCase()
+END FUNCTION
 
-    LET fn = m_tokens[pos].toLowerCase()
+# orExpr := andExpr ( 'or' andExpr )*   (left-associative)
+PRIVATE FUNCTION parseOr() RETURNS INTEGER
+    DEFINE l, r INTEGER
+    LET l = parseAnd()
+    IF m_perr IS NOT NULL THEN RETURN 0 END IF
+    WHILE peekLower() == "or"
+        LET m_tpos = m_tpos + 1
+        LET r = parseAnd()
+        IF m_perr IS NOT NULL THEN RETURN 0 END IF
+        LET l = addNode("or", l, r)
+    END WHILE
+    RETURN l
+END FUNCTION
+
+# andExpr := notExpr ( 'and' notExpr )*   (left-associative)
+PRIVATE FUNCTION parseAnd() RETURNS INTEGER
+    DEFINE l, r INTEGER
+    LET l = parseNot()
+    IF m_perr IS NOT NULL THEN RETURN 0 END IF
+    WHILE peekLower() == "and"
+        LET m_tpos = m_tpos + 1
+        LET r = parseNot()
+        IF m_perr IS NOT NULL THEN RETURN 0 END IF
+        LET l = addNode("and", l, r)
+    END WHILE
+    RETURN l
+END FUNCTION
+
+# notExpr := 'not' notExpr | primary
+PRIVATE FUNCTION parseNot() RETURNS INTEGER
+    DEFINE c INTEGER
+    IF peekLower() == "not" THEN
+        LET m_tpos = m_tpos + 1
+        LET c = parseNot()
+        IF m_perr IS NOT NULL THEN RETURN 0 END IF
+        RETURN addNode("not", c, 0)
+    END IF
+    RETURN parsePrimary()
+END FUNCTION
+
+# primary := '(' orExpr ')' | comparison | function
+PRIVATE FUNCTION parsePrimary() RETURNS INTEGER
+    DEFINE n INTEGER
+    IF m_tpos > m_tokens.getLength() THEN
+        LET m_perr = "Unexpected end of $filter"
+        RETURN 0
+    END IF
+    IF m_tokens[m_tpos] == "(" THEN
+        LET m_tpos = m_tpos + 1
+        LET n = parseOr()
+        IF m_perr IS NOT NULL THEN RETURN 0 END IF
+        IF m_tpos > m_tokens.getLength() OR m_tokens[m_tpos] != ")" THEN
+            LET m_perr = "Expected ')' in $filter"
+            RETURN 0
+        END IF
+        LET m_tpos = m_tpos + 1
+        RETURN n
+    END IF
+    RETURN parsePredicate()
+END FUNCTION
+
+# A single comparison or string-function predicate at the cursor; returns the
+# index of the new "pred" node, advancing m_tpos. Sets m_perr on a malformed
+# predicate.
+PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
+    DEFINE f ODataTypes.T_ODataFilter
+    DEFINE fn, op, rawLit STRING
+
+    INITIALIZE f.* TO NULL
+    LET fn = m_tokens[m_tpos].toLowerCase()
+
     # function form: fn ( property , 'value' )
     IF fn == "contains" OR fn == "startswith" OR fn == "endswith" THEN
-        IF pos + 5 > m_tokens.getLength() THEN
-            RETURN pos, f.*, FALSE, "Malformed string function in $filter"
+        IF m_tpos + 5 > m_tokens.getLength() THEN
+            LET m_perr = "Malformed string function in $filter"
+            RETURN 0
         END IF
-        IF m_tokens[pos + 1] != "(" OR m_tokens[pos + 3] != ","
-            OR m_tokens[pos + 5] != ")" THEN
-            RETURN pos, f.*, FALSE, "Malformed string function in $filter"
+        IF m_tokens[m_tpos + 1] != "(" OR m_tokens[m_tpos + 3] != ","
+            OR m_tokens[m_tpos + 5] != ")" THEN
+            LET m_perr = "Malformed string function in $filter"
+            RETURN 0
         END IF
         LET f.operator = fn
-        LET f.property = m_tokens[pos + 2]
-        LET f.value = stripQuotes(m_tokens[pos + 4])
-        RETURN pos + 6, f.*, TRUE, NULL
+        LET f.property = m_tokens[m_tpos + 2]
+        LET f.value = stripQuotes(m_tokens[m_tpos + 4])
+        LET m_tpos = m_tpos + 6
+        RETURN addPred(f)
     END IF
 
     # comparison form: property compOp literal
-    IF pos + 2 > m_tokens.getLength() THEN
-        RETURN pos, f.*, FALSE, "Incomplete comparison in $filter"
+    IF m_tpos + 2 > m_tokens.getLength() THEN
+        LET m_perr = "Incomplete comparison in $filter"
+        RETURN 0
     END IF
-    LET op = m_tokens[pos + 1].toLowerCase()
+    LET op = m_tokens[m_tpos + 1].toLowerCase()
     CASE op
         WHEN "eq"
         WHEN "ne"
@@ -226,20 +301,41 @@ PRIVATE FUNCTION readPredicate(
         WHEN "ge"
         WHEN "le"
         OTHERWISE
-            RETURN pos, f.*, FALSE,
-                SFMT("Unsupported comparison operator '%1'", op)
+            LET m_perr = SFMT("Unsupported comparison operator '%1'", op)
+            RETURN 0
     END CASE
-    LET f.property = m_tokens[pos]
+    LET f.property = m_tokens[m_tpos]
     LET f.operator = op
     # The bare keyword `null` (unquoted) is the OData null literal; the quoted
     # string 'null' is a normal text value. Both strip to "null", so flag the
     # unquoted form here for the SQL layer to translate to IS [NOT] NULL.
-    IF m_tokens[pos + 2].getCharAt(1) != "'"
-        AND m_tokens[pos + 2].toLowerCase() == "null" THEN
+    LET rawLit = m_tokens[m_tpos + 2]
+    IF rawLit.getCharAt(1) != "'" AND rawLit.toLowerCase() == "null" THEN
         LET f.isNull = TRUE
     END IF
-    LET f.value = stripQuotes(m_tokens[pos + 2])
-    RETURN pos + 3, f.*, TRUE, NULL
+    LET f.value = stripQuotes(rawLit)
+    LET m_tpos = m_tpos + 3
+    RETURN addPred(f)
+END FUNCTION
+
+#+ Append a logical node (and/or/not) to the pool and return its 1-based index.
+PRIVATE FUNCTION addNode(kind STRING, left INTEGER, right INTEGER)
+    RETURNS INTEGER
+    DEFINE n INTEGER
+    LET n = m_nodes.getLength() + 1
+    LET m_nodes[n].kind = kind
+    LET m_nodes[n].left = left
+    LET m_nodes[n].right = right
+    RETURN n
+END FUNCTION
+
+#+ Append a predicate (leaf) node to the pool and return its 1-based index.
+PRIVATE FUNCTION addPred(f ODataTypes.T_ODataFilter) RETURNS INTEGER
+    DEFINE n INTEGER
+    LET n = m_nodes.getLength() + 1
+    LET m_nodes[n].kind = "pred"
+    LET m_nodes[n].pred.* = f.*
+    RETURN n
 END FUNCTION
 
 # ---------------------------------------------------------------------------
@@ -295,36 +391,6 @@ PRIVATE FUNCTION flushToken(cur base.StringBuffer)
         LET m_tokens[m_tokens.getLength() + 1] = t
     END IF
     CALL cur.clear()
-END FUNCTION
-
-PRIVATE FUNCTION containsToken(want STRING) RETURNS BOOLEAN
-    DEFINE i INTEGER
-    FOR i = 1 TO m_tokens.getLength()
-        IF m_tokens[i].toLowerCase() == want THEN
-            RETURN TRUE
-        END IF
-    END FOR
-    RETURN FALSE
-END FUNCTION
-
-# TRUE when every "(" in the token stream is part of a supported string
-# function call (so a bare "(" means unsupported grouping).
-PRIVATE FUNCTION isFunctionForm() RETURNS BOOLEAN
-    DEFINE i INTEGER
-    DEFINE prev STRING
-    FOR i = 1 TO m_tokens.getLength()
-        IF m_tokens[i] == "(" THEN
-            IF i == 1 THEN
-                RETURN FALSE
-            END IF
-            LET prev = m_tokens[i - 1].toLowerCase()
-            IF prev != "contains" AND prev != "startswith"
-                AND prev != "endswith" THEN
-                RETURN FALSE
-            END IF
-        END IF
-    END FOR
-    RETURN TRUE
 END FUNCTION
 
 # ---------------------------------------------------------------------------
