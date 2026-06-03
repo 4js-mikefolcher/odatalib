@@ -148,6 +148,7 @@ PUBLIC FUNCTION getEntitySet(
     DEFINE authRes ODataTypes.T_ODataAuthResult
     DEFINE authCtx ODataTypes.T_ODataAuthContext
     DEFINE baseUrl, nextLink, name, keyVal STRING
+    DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
     DEFINE resp util.JSONObject
 
     LET baseUrl = serviceBaseUrl()
@@ -160,6 +161,8 @@ PUBLIC FUNCTION getEntitySet(
     END IF
 
     # A single OData segment is either "Set" (collection) or "Set(key)" (entity).
+    # keyVal is the raw predicate inside the parentheses (parsed below once the
+    # request is authorised and the entity is known).
     CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
 
     # Authorization hook (no-op when no authorizer is registered). Checked on the
@@ -187,7 +190,8 @@ PUBLIC FUNCTION getEntitySet(
 
     # --- single entity by key -------------------------------------------------
     IF isKeyReq THEN
-        LET result = ODataProvider.fetchByKey(ent, keyVal)
+        CALL parseKeyPredicate(keyVal) RETURNING keyParts
+        LET result = ODataProvider.fetchByKeys(ent, keyParts)
         IF NOT result.ok THEN
             CALL ODataError.raiseCode(result.errorCode, result.errorMessage)
             RETURN NULL
@@ -287,10 +291,13 @@ PRIVATE FUNCTION serviceBaseUrl() RETURNS STRING
     RETURN u
 END FUNCTION
 
-#+ Split a single OData path segment into entity-set name + optional key.
-#+ "Customers"          -> ("Customers", NULL, FALSE)
-#+ "Customers('ALFKI')" -> ("Customers", "ALFKI", TRUE)
-#+ "Orders(10248)"      -> ("Orders", "10248", TRUE)
+#+ Split a single OData path segment into entity-set name + the raw key
+#+ predicate (the text between the parentheses, NOT unquoted/parsed here).
+#+ "Customers"                 -> ("Customers", NULL, FALSE)
+#+ "Customers('ALFKI')"        -> ("Customers", "'ALFKI'", TRUE)
+#+ "Orders(10248)"             -> ("Orders", "10248", TRUE)
+#+ "OrderDetails(OrderID=10248,ProductID=11)"
+#+                             -> ("OrderDetails", "OrderID=10248,ProductID=11", TRUE)
 PRIVATE FUNCTION splitEntityKey(seg STRING)
     RETURNS (STRING, STRING, BOOLEAN)
     DEFINE lp INTEGER
@@ -300,10 +307,100 @@ PRIVATE FUNCTION splitEntityKey(seg STRING)
     LET lp = seg.getIndexOf("(", 1)
     IF lp > 1 AND seg.getCharAt(seg.getLength()) == ")" THEN
         RETURN seg.subString(1, lp - 1),
-            unquoteKey(seg.subString(lp + 1, seg.getLength() - 1)),
+            seg.subString(lp + 1, seg.getLength() - 1),
             TRUE
     END IF
     RETURN seg, NULL, FALSE
+END FUNCTION
+
+#+ Parse the raw key predicate into ordered key parts. Each comma-separated
+#+ segment is either "Name=value" (named, required for composite keys) or a bare
+#+ "value" (the unnamed single-key form). Values are unquoted. Commas and '='
+#+ inside single-quoted values are respected.
+PRIVATE FUNCTION parseKeyPredicate(inner STRING)
+    RETURNS DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
+    DEFINE parts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
+    DEFINE segs DYNAMIC ARRAY OF STRING
+    DEFINE i, eq, n INTEGER
+    DEFINE seg STRING
+    IF inner IS NULL OR inner.getLength() == 0 THEN
+        RETURN parts
+    END IF
+    CALL splitTopLevel(inner) RETURNING segs
+    FOR i = 1 TO segs.getLength()
+        LET seg = segs[i].trim()
+        LET eq = indexOfUnquoted(seg, "=")
+        LET n = parts.getLength() + 1
+        IF eq > 0 THEN
+            LET parts[n].name = seg.subString(1, eq - 1).trim()
+            LET parts[n].value =
+                unquoteKey(seg.subString(eq + 1, seg.getLength()).trim())
+        ELSE
+            LET parts[n].name = ""
+            LET parts[n].value = unquoteKey(seg)
+        END IF
+    END FOR
+    RETURN parts
+END FUNCTION
+
+#+ Split on top-level commas, treating single-quoted runs (with '' escaping) as
+#+ opaque so a comma inside a quoted key value is not a separator.
+PRIVATE FUNCTION splitTopLevel(s STRING) RETURNS DYNAMIC ARRAY OF STRING
+    DEFINE out DYNAMIC ARRAY OF STRING
+    DEFINE buf base.StringBuffer
+    DEFINE i, n INTEGER
+    DEFINE c STRING
+    DEFINE inStr BOOLEAN = FALSE
+    LET buf = base.StringBuffer.create()
+    LET n = s.getLength()
+    LET i = 1
+    WHILE i <= n
+        LET c = s.getCharAt(i)
+        IF inStr THEN
+            CALL buf.append(c)
+            IF c == "'" THEN
+                IF i < n AND s.getCharAt(i + 1) == "'" THEN
+                    CALL buf.append("'")
+                    LET i = i + 1
+                ELSE
+                    LET inStr = FALSE
+                END IF
+            END IF
+        ELSE
+            CASE
+                WHEN c == "'"
+                    CALL buf.append(c)
+                    LET inStr = TRUE
+                WHEN c == ","
+                    LET out[out.getLength() + 1] = buf.toString()
+                    CALL buf.clear()
+                OTHERWISE
+                    CALL buf.append(c)
+            END CASE
+        END IF
+        LET i = i + 1
+    END WHILE
+    LET out[out.getLength() + 1] = buf.toString()
+    RETURN out
+END FUNCTION
+
+#+ Index (1-based) of the first occurrence of ch outside single quotes, else 0.
+PRIVATE FUNCTION indexOfUnquoted(s STRING, ch STRING) RETURNS INTEGER
+    DEFINE i, n INTEGER
+    DEFINE c STRING
+    DEFINE inStr BOOLEAN = FALSE
+    LET n = s.getLength()
+    FOR i = 1 TO n
+        LET c = s.getCharAt(i)
+        IF c == "'" THEN
+            LET inStr = NOT inStr
+        ELSE
+            IF (NOT inStr) AND c == ch THEN
+                RETURN i
+            END IF
+        END IF
+    END FOR
+    RETURN 0
 END FUNCTION
 
 #+ Strip the surrounding single quotes from a string key predicate.

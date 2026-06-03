@@ -121,6 +121,113 @@ PUBLIC FUNCTION columnFor(
 END FUNCTION
 
 # ---------------------------------------------------------------------------
+# Key resolution (single or composite)
+# ---------------------------------------------------------------------------
+
+#+ The ordered list of key property names for an entity: every property flagged
+#+ isKey (composite keys keep declaration order), or the single `keyName`
+#+ shorthand when no property carries the flag. Empty when the entity has no key.
+PUBLIC FUNCTION keyProperties(entity ODataTypes.T_ODataEntity)
+    RETURNS DYNAMIC ARRAY OF STRING
+    DEFINE out DYNAMIC ARRAY OF STRING
+    DEFINE i INTEGER
+    FOR i = 1 TO entity.properties.getLength()
+        IF entity.properties[i].isKey THEN
+            LET out[out.getLength() + 1] = entity.properties[i].name
+        END IF
+    END FOR
+    IF out.getLength() == 0
+        AND entity.keyName IS NOT NULL AND entity.keyName.getLength() > 0 THEN
+        LET out[1] = entity.keyName
+    END IF
+    RETURN out
+END FUNCTION
+
+#+ TRUE when propName is one of the entity's key properties.
+PUBLIC FUNCTION isKeyProperty(
+    entity ODataTypes.T_ODataEntity, propName STRING) RETURNS BOOLEAN
+    DEFINE kp DYNAMIC ARRAY OF STRING
+    DEFINE i INTEGER
+    LET kp = keyProperties(entity)
+    FOR i = 1 TO kp.getLength()
+        IF kp[i] == propName THEN
+            RETURN TRUE
+        END IF
+    END FOR
+    RETURN FALSE
+END FUNCTION
+
+#+ Turn a parsed key predicate into eq filters AND-ed over the key properties.
+#+ Validates arity and names so a malformed key is a clean 400. The unnamed form
+#+ (name == "") is only valid for a single-key entity. Returns (filters, ok, err).
+PUBLIC FUNCTION buildKeyFilters(
+    entity ODataTypes.T_ODataEntity,
+    keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart)
+    RETURNS (DYNAMIC ARRAY OF ODataTypes.T_ODataFilter, BOOLEAN, STRING)
+    DEFINE filters DYNAMIC ARRAY OF ODataTypes.T_ODataFilter
+    DEFINE keyProps DYNAMIC ARRAY OF STRING
+    DEFINE i, np INTEGER
+    DEFINE pname STRING
+
+    LET keyProps = keyProperties(entity)
+    IF keyProps.getLength() == 0 THEN
+        RETURN filters, FALSE, SFMT("Entity '%1' has no key", entity.name)
+    END IF
+    LET np = keyParts.getLength()
+    IF np != keyProps.getLength() THEN
+        RETURN filters, FALSE,
+            SFMT("Key for '%1' needs %2 value(s), got %3",
+                entity.name, keyProps.getLength(), np)
+    END IF
+
+    FOR i = 1 TO np
+        LET pname = keyParts[i].name
+        IF pname IS NULL OR pname.getLength() == 0 THEN
+            IF keyProps.getLength() != 1 THEN
+                RETURN filters, FALSE,
+                    SFMT("The composite key of '%1' must name each value",
+                        entity.name)
+            END IF
+            LET pname = keyProps[1]
+        ELSE
+            IF NOT isKeyProperty(entity, pname) THEN
+                RETURN filters, FALSE,
+                    SFMT("'%1' is not a key property of '%2'",
+                        pname, entity.name)
+            END IF
+        END IF
+        LET filters[i].property = pname
+        LET filters[i].operator = "eq"
+        LET filters[i].value = keyParts[i].value
+        LET filters[i].isNull = FALSE
+        IF i < np THEN
+            LET filters[i].conjunction = "and"
+        ELSE
+            LET filters[i].conjunction = ""
+        END IF
+    END FOR
+    RETURN filters, TRUE, NULL
+END FUNCTION
+
+#+ Render a key predicate for diagnostics, e.g. "OrderID=10248,ProductID=11" or
+#+ the bare value for an unnamed single key.
+PUBLIC FUNCTION keyDescription(
+    keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart) RETURNS STRING
+    DEFINE buf base.StringBuffer
+    DEFINE i INTEGER
+    LET buf = base.StringBuffer.create()
+    FOR i = 1 TO keyParts.getLength()
+        IF i > 1 THEN CALL buf.append(",") END IF
+        IF keyParts[i].name IS NOT NULL AND keyParts[i].name.getLength() > 0 THEN
+            CALL buf.append(keyParts[i].name)
+            CALL buf.append("=")
+        END IF
+        CALL buf.append(keyParts[i].value)
+    END FOR
+    RETURN buf.toString()
+END FUNCTION
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

@@ -40,17 +40,19 @@ PUBLIC FUNCTION fetch(
     END CASE
 END FUNCTION
 
-#+ Fetch a single entity by key using its configured provider.
-PUBLIC FUNCTION fetchByKey(
-    entity ODataTypes.T_ODataEntity, keyValue STRING)
+#+ Fetch a single entity by its (possibly composite) key predicate using the
+#+ entity's configured provider.
+PUBLIC FUNCTION fetchByKeys(
+    entity ODataTypes.T_ODataEntity,
+    keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart)
     RETURNS ODataTypes.T_ODataResult
     DEFINE res ODataTypes.T_ODataResult
 
     CASE entity.provider
         WHEN "sql"
-            RETURN ODataSqlProvider.fetchByKey(entity, keyValue)
+            RETURN ODataSqlProvider.fetchByKeys(entity, keyParts)
         WHEN "function"
-            RETURN ODataFunctionProvider.fetchByKey(entity, keyValue)
+            RETURN ODataFunctionProvider.fetchByKeys(entity, keyParts)
         OTHERWISE
             LET res.ok = FALSE
             LET res.errorCode = "InternalError"
@@ -59,4 +61,15 @@ PUBLIC FUNCTION fetchByKey(
                     entity.provider, entity.name)
             RETURN res
     END CASE
+END FUNCTION
+
+#+ Convenience for a single unnamed key value (e.g. a SmokeTest call or any
+#+ caller that already has the bare key). Wraps it as one unnamed key part.
+PUBLIC FUNCTION fetchByKey(
+    entity ODataTypes.T_ODataEntity, keyValue STRING)
+    RETURNS ODataTypes.T_ODataResult
+    DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
+    LET keyParts[1].name = ""
+    LET keyParts[1].value = keyValue
+    RETURN fetchByKeys(entity, keyParts)
 END FUNCTION

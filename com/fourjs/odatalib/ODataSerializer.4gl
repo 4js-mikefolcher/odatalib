@@ -51,6 +51,7 @@ PUBLIC FUNCTION buildMetadata() RETURNS STRING
     DEFINE i, j INTEGER
     DEFINE ent ODataTypes.T_ODataEntity
     DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE keyProps DYNAMIC ARRAY OF STRING
     DEFINE ns, nullable STRING
 
     LET ns = ODataConfig.getNamespace()
@@ -64,15 +65,20 @@ PUBLIC FUNCTION buildMetadata() RETURNS STRING
     FOR i = 1 TO ODataConfig.getEntityCount()
         LET ent = ODataConfig.getEntityAt(i)
         CALL buf.append(SFMT('   <EntityType Name="%1">\n', ent.entityType))
-        IF ent.keyName IS NOT NULL THEN
+        # <Key> lists every key property (one <PropertyRef> per part of a
+        # composite key), in declaration order.
+        LET keyProps = ODataConfig.keyProperties(ent)
+        IF keyProps.getLength() > 0 THEN
             CALL buf.append("    <Key>\n")
-            CALL buf.append(
-                SFMT('     <PropertyRef Name="%1"/>\n', ent.keyName))
+            FOR j = 1 TO keyProps.getLength()
+                CALL buf.append(
+                    SFMT('     <PropertyRef Name="%1"/>\n', keyProps[j]))
+            END FOR
             CALL buf.append("    </Key>\n")
         END IF
         FOR j = 1 TO ent.properties.getLength()
             LET prop = ent.properties[j]
-            IF prop.isKey THEN
+            IF ODataConfig.isKeyProperty(ent, prop.name) THEN
                 LET nullable = "false"
             ELSE
                 LET nullable = "true"

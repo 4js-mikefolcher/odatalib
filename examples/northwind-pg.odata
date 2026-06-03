@@ -38,6 +38,20 @@
       ]
     },
     {
+      "name": "OrderDetails",
+      "entityType": "OrderDetail",
+      "provider": "sql",
+      "source": "order_details",
+      "pageSize": 100,
+      "properties": [
+        { "name": "OrderID",   "column": "orderid",   "type": "Edm.Int32",  "key": true },
+        { "name": "ProductID", "column": "productid", "type": "Edm.Int32",  "key": true },
+        { "name": "UnitPrice", "column": "unitprice", "type": "Edm.Double" },
+        { "name": "Quantity",  "column": "quantity",  "type": "Edm.Int16" },
+        { "name": "Discount",  "column": "discount",  "type": "Edm.Double" }
+      ]
+    },
+    {
       "name": "Products",
       "entityType": "Product",
       "provider": "sql",

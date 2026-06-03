@@ -47,7 +47,7 @@ Metabase, …) can then consume the data with zero client-side code.
 | `GET` | `/` | Service document (entity-set listing) |
 | `GET` | `/$metadata` | CSDL metadata (XML) |
 | `GET` | `/{EntitySet}` | Entity collection (+ `$`-query options) |
-| `GET` | `/{EntitySet}(key)` | Single entity by key, e.g. `/Customers('ALFKI')` or `/Orders(10248)` |
+| `GET` | `/{EntitySet}(key)` | Single entity by key — single `/Customers('ALFKI')`, `/Orders(10248)`, `/Products(ProductID=11)`, or composite `/OrderDetails(OrderID=10248,ProductID=11)` |
 
 The collection and single-entity routes share one GAS template — `Customers`
 and `Customers('ALFKI')` are both single OData path segments, so the service
@@ -104,6 +104,11 @@ exposes (with OData `Edm.*` types and the backing DB column for SQL providers).
 Notes:
 - JSON keys map onto BDL records via `json_name` — `type` → `edmType`,
   `key` → `isKey`/`keyName`.
+- **Keys** can be single or composite. The entity-level `"key"` is a shorthand
+  for a single key; alternatively (and required for composite keys) flag each key
+  property with `"key": true`. A composite key is addressed with the named form
+  `OrderDetails(OrderID=10248,ProductID=11)`; a single key accepts either the
+  unnamed (`Products(11)`) or named (`Products(ProductID=11)`) form.
 - For SQL providers, only declared properties are ever selected (never
   `SELECT *`), and JSON keys come from the config property names by SELECT
   position, so the wire shape is stable across database engines.
@@ -261,8 +266,9 @@ For a richer, strictly-typed dataset (the full 14-table Northwind, with numeric,
 `real` and `date` columns), point the example at a PostgreSQL `northwind`
 database. `examples/fglprofile` maps the `northwind` connection name to the
 `dbmpgs` driver, and `examples/northwind-pg.odata` declares the larger schema
-(Customers, Orders, Products, Categories, Suppliers + the CountrySummary
-function provider) with the real Postgres column names and `Edm.*` types.
+(Customers, Orders, Products, Categories, Suppliers, the composite-key
+OrderDetails entity, and the CountrySummary function provider) with the real
+Postgres column names and `Edm.*` types.
 
 ```bash
 export FGLLDPATH="$PWD:$PWD/examples:$FGLLDPATH"
@@ -276,6 +282,11 @@ FGLGUI=0 fglrun PgSmokeTest                       # connects as nwuser
 integer / `real` / `date` `$filter`s, an integer key lookup, and `Edm.Date`
 serialisation. This is the dataset used to verify the type-aware binding and
 `LIKE`-escaping fixes noted under [Limitations & roadmap](#limitations--roadmap).
+
+To serve this dataset over GAS (e.g. to exercise composite-key URLs live),
+`examples/NorthwindPgService.4gl` + `examples/resources/northwind-pg.xcf` are the
+PostgreSQL counterparts of the SQLite `NorthwindService` — they connect via
+`FGLPROFILE` and serve `northwind-pg.odata`.
 
 ## Consuming from Power BI
 
@@ -349,3 +360,8 @@ including Power BI; the body is well-formed CSDL.
   operator, and correct `not` > `and` > `or` precedence are all supported (e.g.
   `(Country eq 'Germany' or Country eq 'France') and not contains(City,'a')`).
   Unbalanced parentheses return a clean `400`.
+- *Composite-key entities.* An entity may declare more than one key property
+  (`"key": true` per property). Key lookups accept the named form
+  `OrderDetails(OrderID=10248,ProductID=11)` (and named/unnamed single keys);
+  `$metadata` emits one `<PropertyRef>` per key part. A wrong arity or non-key
+  name returns a clean `400`. Verified on live GAS against PostgreSQL.

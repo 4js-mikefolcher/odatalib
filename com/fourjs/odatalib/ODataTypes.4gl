@@ -42,6 +42,16 @@ PUBLIC TYPE T_ODataSchema RECORD
     entities DYNAMIC ARRAY OF T_ODataEntity
 END RECORD
 
+# One component of a key predicate parsed from the request URL. `name` is the
+# key property named in the URL (e.g. OrderDetails(OrderID=10248,ProductID=11));
+# it is empty for the unnamed single-key form (e.g. Customers('ALFKI')), which
+# the provider resolves to the entity's sole key property. An entity's key
+# properties are the properties flagged isKey (or the single keyName shorthand).
+PUBLIC TYPE T_ODataKeyPart RECORD
+    name STRING,
+    value STRING
+END RECORD
+
 # ---------------------------------------------------------------------------
 # Normalised query model (output of ODataQuery.parse)
 # ---------------------------------------------------------------------------

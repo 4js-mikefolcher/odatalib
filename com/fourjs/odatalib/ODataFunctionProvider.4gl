@@ -27,6 +27,7 @@ PACKAGE com.fourjs.odatalib
 
 IMPORT util
 IMPORT FGL com.fourjs.odatalib.ODataTypes
+IMPORT FGL com.fourjs.odatalib.ODataConfig
 
 CONSTANT DEFAULT_PAGE_SIZE = 200
 CONSTANT MAX_PAGE_SIZE = 1000
@@ -113,31 +114,40 @@ PUBLIC FUNCTION fetch(
     RETURN res
 END FUNCTION
 
-#+ Single entity by key: ask the callback to filter on the key property.
-PUBLIC FUNCTION fetchByKey(
-    entity ODataTypes.T_ODataEntity, keyValue STRING)
+#+ Single entity by key predicate (single or composite): hand the callback a
+#+ query carrying an eq filter per key property and let it filter / access-control.
+PUBLIC FUNCTION fetchByKeys(
+    entity ODataTypes.T_ODataEntity,
+    keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart)
     RETURNS ODataTypes.T_ODataResult
     DEFINE q ODataTypes.T_ODataQuery
-    DEFINE f ODataTypes.T_ODataFilter
+    DEFINE filters DYNAMIC ARRAY OF ODataTypes.T_ODataFilter
     DEFINE res ODataTypes.T_ODataResult
+    DEFINE ok BOOLEAN
+    DEFINE err STRING
+    DEFINE i INTEGER
+
+    CALL ODataConfig.buildKeyFilters(entity, keyParts) RETURNING filters, ok, err
+    IF NOT ok THEN
+        RETURN errorResult("BadRequest", err)
+    END IF
 
     LET q.ok = TRUE
     LET q.skip = 0
     LET q.top = 1
     LET q.hasTop = TRUE
     LET q.wantCount = FALSE
-    LET f.property = entity.keyName
-    LET f.operator = "eq"
-    LET f.value = keyValue
-    LET f.conjunction = ""
-    LET q.filters[1].* = f.*
+    FOR i = 1 TO filters.getLength()
+        LET q.filters[i].* = filters[i].*
+    END FOR
 
     LET res = fetch(entity, q)
     IF res.ok AND res.rows.getLength() == 0 THEN
         LET res.ok = FALSE
         LET res.errorCode = "NotFound"
         LET res.errorMessage =
-            SFMT("No %1 with key '%2'", entity.name, keyValue)
+            SFMT("No %1 with key %2",
+                entity.name, ODataConfig.keyDescription(keyParts))
     END IF
     RETURN res
 END FUNCTION

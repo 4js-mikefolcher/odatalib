@@ -164,32 +164,44 @@ PUBLIC FUNCTION fetch(
     RETURN res
 END FUNCTION
 
-#+ Fetch a single entity by key value. Returns ok=FALSE / NotFound when absent.
-PUBLIC FUNCTION fetchByKey(
-    entity ODataTypes.T_ODataEntity, keyValue STRING)
+#+ Fetch a single entity by its key predicate (single or composite). Returns
+#+ ok=FALSE / NotFound when absent, BadRequest when the key predicate is invalid.
+PUBLIC FUNCTION fetchByKeys(
+    entity ODataTypes.T_ODataEntity,
+    keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart)
     RETURNS ODataTypes.T_ODataResult
     DEFINE q ODataTypes.T_ODataQuery
-    DEFINE f ODataTypes.T_ODataFilter
+    DEFINE filters DYNAMIC ARRAY OF ODataTypes.T_ODataFilter
     DEFINE res ODataTypes.T_ODataResult
+    DEFINE ok BOOLEAN
+    DEFINE err STRING
+    DEFINE i INTEGER
 
-    # Build a query that filters on the key property.
+    # Build an eq filter per key property (AND-ed). A bad key predicate is a 400.
+    CALL ODataConfig.buildKeyFilters(entity, keyParts) RETURNING filters, ok, err
+    IF NOT ok THEN
+        LET res.ok = FALSE
+        LET res.errorCode = "BadRequest"
+        LET res.errorMessage = err
+        RETURN res
+    END IF
+
     LET q.ok = TRUE
     LET q.skip = 0
     LET q.top = 1
     LET q.hasTop = TRUE
     LET q.wantCount = FALSE
-    LET f.property = entity.keyName
-    LET f.operator = "eq"
-    LET f.value = keyValue
-    LET f.conjunction = ""
-    LET q.filters[1].* = f.*
+    FOR i = 1 TO filters.getLength()
+        LET q.filters[i].* = filters[i].*
+    END FOR
 
     CALL fetch(entity, q) RETURNING res.*
     IF res.ok AND res.rows.getLength() == 0 THEN
         LET res.ok = FALSE
         LET res.errorCode = "NotFound"
         LET res.errorMessage =
-            SFMT("No %1 with key '%2'", entity.name, keyValue)
+            SFMT("No %1 with key %2",
+                entity.name, ODataConfig.keyDescription(keyParts))
     END IF
     RETURN res
 END FUNCTION
