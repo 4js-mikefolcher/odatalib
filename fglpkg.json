@@ -1,13 +1,18 @@
 {
   "name": "odatalib",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Genero BDL library for exposing read-only OData v4 services over GAS REST. Hybrid pluggable providers (SQL / BDL function), .odata config-driven schema.",
   "author": "michael.folcher@4js.com",
   "license": "Apache-2.0",
   "repository": "https://github.com/4js-mikefolcher/odatalib",
   "genero": "^6.0.0",
+  "dependencies": {},
   "root": "com/fourjs/odatalib",
-  "files": ["*.42m"],
-  "docs": ["README.md", "docs/**/*.md"],
-  "dependencies": {}
+  "files": [
+    "*.42m"
+  ],
+  "docs": [
+    "README.md",
+    "docs/**/*.md"
+  ]
 }
