@@ -24,6 +24,23 @@ PUBLIC TYPE T_ODataProperty RECORD
     isKey BOOLEAN ATTRIBUTES(json_name = "key")    # part of the entity key?
 END RECORD
 
+# One join-key pair of a navigation property: a property on THIS entity (`from`)
+# matched against a property on the target entity (`to`). A list of pairs allows
+# composite-column joins (v1 materialises single-pair joins).
+PUBLIC TYPE T_ODataJoinPair RECORD
+    fromProp STRING ATTRIBUTES(json_name = "from"),
+    toProp STRING ATTRIBUTES(json_name = "to")
+END RECORD
+
+# A navigation property: a declared relationship to another entity set, exposed
+# to $expand and as a CSDL <NavigationProperty>.
+PUBLIC TYPE T_ODataNavigation RECORD
+    name STRING,                                   # $expand token + nested JSON key
+    target STRING,                                 # target entity set name
+    kind STRING,                                   # "one" (object) | "many" (array)
+    on DYNAMIC ARRAY OF T_ODataJoinPair            # join key pair(s)
+END RECORD
+
 # A single entity set + its backing provider binding.
 PUBLIC TYPE T_ODataEntity RECORD
     name STRING,                                   # entity set name, e.g. "Customers"
@@ -32,13 +49,15 @@ PUBLIC TYPE T_ODataEntity RECORD
     source STRING,                                 # table/view (sql) or function id
     keyName STRING ATTRIBUTES(json_name = "key"),  # property name of the single key
     pageSize INTEGER,                              # server page size (0 -> default)
-    properties DYNAMIC ARRAY OF T_ODataProperty
+    properties DYNAMIC ARRAY OF T_ODataProperty,
+    navigation DYNAMIC ARRAY OF T_ODataNavigation  # declared relationships (optional)
 END RECORD
 
 # The whole service schema as declared in one .odata file.
 PUBLIC TYPE T_ODataSchema RECORD
     service STRING,                                # OData service name
     namespace STRING,                              # CSDL namespace
+    expandMaxRows INTEGER,                          # cap on rows fetched per $expand (0 -> default)
     entities DYNAMIC ARRAY OF T_ODataEntity
 END RECORD
 
@@ -61,8 +80,9 @@ END RECORD
 # ("and" / "or"); empty on the final predicate.
 PUBLIC TYPE T_ODataFilter RECORD
     property STRING,
-    operator STRING,        # eq ne gt lt ge le contains startswith endswith
-    value STRING,
+    operator STRING,        # eq ne gt lt ge le contains startswith endswith in
+    value STRING,           # the single literal (empty for the `in` operator)
+    values DYNAMIC ARRAY OF STRING,  # the value list for the `in` operator
     isNull BOOLEAN,         # TRUE when the literal was the bare keyword null
     conjunction STRING      # and | or | "" (trailing)
 END RECORD
@@ -71,6 +91,13 @@ END RECORD
 PUBLIC TYPE T_ODataOrderBy RECORD
     property STRING,
     descending BOOLEAN
+END RECORD
+
+# One parsed $expand item: a navigation property name and an optional nested
+# $select projecting the expanded entity (empty selectList => all properties).
+PUBLIC TYPE T_ODataExpandItem RECORD
+    path STRING,
+    selectList DYNAMIC ARRAY OF STRING
 END RECORD
 
 # One node of the parsed $filter expression tree. Nodes live in a flat pool
@@ -100,10 +127,12 @@ PUBLIC TYPE T_ODataQuery RECORD
     filterNodes DYNAMIC ARRAY OF T_ODataFilterNode,
     filterRoot INTEGER,
     orderby DYNAMIC ARRAY OF T_ODataOrderBy,
-    expand DYNAMIC ARRAY OF STRING,
+    expand DYNAMIC ARRAY OF T_ODataExpandItem,
     top INTEGER,
     skip INTEGER,
     hasTop BOOLEAN,
+    maxRows INTEGER,        # > 0 -> fetch up to this many rows, bypassing server paging
+                            # (used by $expand's batched related fetch)
     wantCount BOOLEAN,
     ok BOOLEAN,             # FALSE if a query option was malformed/unsupported
     errorCode STRING,       # OData error code when ok == FALSE

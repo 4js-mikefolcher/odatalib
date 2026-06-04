@@ -86,6 +86,7 @@ PUBLIC FUNCTION buildMetadata() RETURNS STRING
             CALL buf.append(SFMT('    <Property Name="%1" Type="%2" Nullable="%3"/>\n',
                 prop.name, edmTypeOrDefault(prop.edmType), nullable))
         END FOR
+        CALL appendNavigation(buf, ent, ns)
         CALL buf.append("   </EntityType>\n")
     END FOR
 
@@ -109,6 +110,43 @@ PRIVATE FUNCTION edmTypeOrDefault(t STRING) RETURNS STRING
         RETURN "Edm.String"
     END IF
     RETURN t
+END FUNCTION
+
+#+ Emit a <NavigationProperty> per declared relationship. to-many uses a
+#+ Collection(...) type; a single-pair to-one also emits a <ReferentialConstraint>.
+PRIVATE FUNCTION appendNavigation(
+    buf base.StringBuffer, ent ODataTypes.T_ODataEntity, ns STRING)
+    DEFINE i INTEGER
+    DEFINE nav ODataTypes.T_ODataNavigation
+    DEFINE tgt ODataTypes.T_ODataEntity
+    DEFINE found BOOLEAN
+    DEFINE navType STRING
+
+    FOR i = 1 TO ent.navigation.getLength()
+        LET nav.* = ent.navigation[i].*
+        CALL ODataConfig.findEntity(nav.target) RETURNING tgt.*, found
+        IF NOT found THEN
+            CONTINUE FOR              # skip a relationship to an unknown target
+        END IF
+        IF nav.kind == "many" THEN
+            LET navType = SFMT("Collection(%1.%2)", ns, tgt.entityType)
+        ELSE
+            LET navType = SFMT("%1.%2", ns, tgt.entityType)
+        END IF
+        IF nav.kind == "one" AND nav.on.getLength() == 1 THEN
+            CALL buf.append(SFMT(
+                '    <NavigationProperty Name="%1" Type="%2">\n',
+                nav.name, navType))
+            CALL buf.append(SFMT(
+                '     <ReferentialConstraint Property="%1" ReferencedProperty="%2"/>\n',
+                nav.on[1].fromProp, nav.on[1].toProp))
+            CALL buf.append("    </NavigationProperty>\n")
+        ELSE
+            CALL buf.append(SFMT(
+                '    <NavigationProperty Name="%1" Type="%2"/>\n',
+                nav.name, navType))
+        END IF
+    END FOR
 END FUNCTION
 
 # ---------------------------------------------------------------------------

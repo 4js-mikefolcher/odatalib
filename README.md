@@ -56,17 +56,21 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 
 ### Supported OData v4 query surface (v0)
 
-- `$filter` — `eq ne gt lt ge le`, and `contains` / `startswith` / `endswith`,
-  combined with `and` / `or` / `not` and parenthesised grouping, with correct
-  `not` > `and` > `or` precedence; `eq null` / `ne null` map to SQL `IS NULL` /
-  `IS NOT NULL`
+- `$filter` — `eq ne gt lt ge le`, `in (…)`, and `contains` / `startswith` /
+  `endswith`, combined with `and` / `or` / `not` and parenthesised grouping, with
+  correct `not` > `and` > `or` precedence; `eq null` / `ne null` map to SQL
+  `IS NULL` / `IS NOT NULL`
 - `$select` — property projection
 - `$top`, `$skip` — pagination
 - `$orderby` — multi-term, `asc` / `desc`
 - `$count=true` — total count via `@odata.count`
 - Server-driven paging — `@odata.nextLink`, default page size 200, cap 1000
   (per-entity `pageSize`)
-- `$expand` — captured but not yet materialised
+- `$expand` — one-level, to-one and to-many navigation properties, with an
+  optional nested `$select`. Backed by declared relationships (see
+  [The `.odata` configuration file](#the-odata-configuration-file)) and
+  materialised with one batched query per expanded property. Nested
+  `$filter`/`$top`/`$orderby`, multi-level expand and `$expand=*` return `501`.
 
 Malformed options return a `400 BadRequest`; unsupported-but-recognised
 constructs return `501 NotImplemented`; both as OData error envelopes.
@@ -109,6 +113,20 @@ Notes:
   property with `"key": true`. A composite key is addressed with the named form
   `OrderDetails(OrderID=10248,ProductID=11)`; a single key accepts either the
   unnamed (`Products(11)`) or named (`Products(ProductID=11)`) form.
+- **Relationships** for `$expand` are declared per entity in an optional
+  `navigation` array, each entry naming the target entity set, the cardinality
+  (`"kind": "one"` | `"many"`) and the join key pair(s):
+  ```json
+  "navigation": [
+    { "name": "Customer",     "target": "Customers",    "kind": "one",
+      "on": [{ "from": "CustomerID", "to": "CustomerID" }] },
+    { "name": "OrderDetails", "target": "OrderDetails",  "kind": "many",
+      "on": [{ "from": "OrderID", "to": "OrderID" }] }
+  ]
+  ```
+  `from` is a property on this entity, `to` a property on the target. The
+  service-level `"expandMaxRows"` (default 10000) caps the rows fetched per
+  expansion.
 - For SQL providers, only declared properties are ever selected (never
   `SELECT *`), and JSON keys come from the config property names by SELECT
   position, so the wire shape is stable across database engines.
@@ -327,8 +345,9 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- `$expand` materialisation, `$batch`, `$apply`, lambda operators (`any`/`all`),
-  delta/change-tracking, actions/functions
+- `$batch`, `$apply`, lambda operators (`any`/`all`), delta/change-tracking,
+  actions/functions; multi-level `$expand` and nested expand options beyond
+  `$select`
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
@@ -365,3 +384,16 @@ including Power BI; the body is well-formed CSDL.
   `OrderDetails(OrderID=10248,ProductID=11)` (and named/unnamed single keys);
   `$metadata` emits one `<PropertyRef>` per key part. A wrong arity or non-key
   name returns a clean `400`. Verified on live GAS against PostgreSQL.
+- *`$expand` (one level).* Declared `navigation` relationships are materialised
+  into the response — to-one as a nested object, to-many as a nested array — with
+  an optional nested `$select`. Expansion runs above the providers: the parent
+  rows' join keys drive a single batched `in (…)` query against the target
+  entity's provider, then rows are stitched back by key (so it works across the
+  SQL/function boundary). `$metadata` advertises the relationships as
+  `<NavigationProperty>`. A new `in` filter operator backs this and is exposed in
+  `$filter`. The per-service `expandMaxRows` (default 10000) caps the related
+  fetch.
+- *Service loop lifecycle.* `ODataService.run()` now only terminates the DVM on
+  `-2` / `-4` / `-10` (per the documented engine contract); transient
+  per-connection codes such as `-3` no longer end the process, so the GAS pool
+  reuses the DVM instead of churning under load.

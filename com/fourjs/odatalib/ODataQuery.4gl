@@ -54,7 +54,11 @@ PUBLIC FUNCTION parse(
     LET q.wantCount = FALSE
 
     CALL splitList(selectStr) RETURNING q.selectList
-    CALL splitList(expandStr) RETURNING q.expand
+
+    IF expandStr IS NOT NULL AND expandStr.getLength() > 0 THEN
+        CALL parseExpand(expandStr, q) RETURNING q
+        IF NOT q.ok THEN RETURN q END IF
+    END IF
 
     IF topStr IS NOT NULL AND topStr.getLength() > 0 THEN
         IF isUnsignedInt(topStr) THEN
@@ -132,6 +136,118 @@ PRIVATE FUNCTION parseOrderBy(
         LET q.orderby[n].* = ob.*
     END FOR
     RETURN q
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# $expand
+#
+# Grammar (v1): item ( ',' item )*, item = NAME [ '(' '$select' '=' props ')' ].
+# A bare NAME expands all target properties; the only supported nested option is
+# $select. Any other nested option, nested $expand, or '*' => 501.
+# ---------------------------------------------------------------------------
+PRIVATE FUNCTION parseExpand(
+    s STRING, q ODataTypes.T_ODataQuery)
+    RETURNS ODataTypes.T_ODataQuery
+    DEFINE items DYNAMIC ARRAY OF STRING
+    DEFINE i, lp, n INTEGER
+    DEFINE item, nm, inner STRING
+    DEFINE xi ODataTypes.T_ODataExpandItem
+
+    CALL splitExpandItems(s) RETURNING items
+    FOR i = 1 TO items.getLength()
+        INITIALIZE xi.* TO NULL
+        CALL xi.selectList.clear()
+        LET item = items[i].trim()
+        IF item.getLength() == 0 THEN CONTINUE FOR END IF
+        IF item == "*" THEN
+            CALL setErr(q, "NotImplemented",
+                "$expand=* is not supported in v0") RETURNING q
+            RETURN q
+        END IF
+        LET lp = item.getIndexOf("(", 1)
+        IF lp > 0 THEN
+            IF item.getCharAt(item.getLength()) != ")" THEN
+                CALL setErr(q, "BadRequest",
+                    "Malformed $expand option") RETURNING q
+                RETURN q
+            END IF
+            LET nm = item.subString(1, lp - 1).trim()
+            LET inner = item.subString(lp + 1, item.getLength() - 1)
+            CALL parseExpandOptions(inner, xi)
+                RETURNING xi.*, q.ok, q.errorCode, q.errorMessage
+            IF NOT q.ok THEN RETURN q END IF
+        ELSE
+            LET nm = item
+        END IF
+        IF nm.getLength() == 0 THEN
+            CALL setErr(q, "BadRequest",
+                "Missing navigation property in $expand") RETURNING q
+            RETURN q
+        END IF
+        LET xi.path = nm
+        LET n = q.expand.getLength() + 1
+        LET q.expand[n].* = xi.*
+    END FOR
+    RETURN q
+END FUNCTION
+
+# Parse the nested options inside an $expand item's parentheses. v1 accepts only
+# $select; anything else (incl. a nested $expand) is 501.
+PRIVATE FUNCTION parseExpandOptions(
+    inner STRING, xi ODataTypes.T_ODataExpandItem)
+    RETURNS (ODataTypes.T_ODataExpandItem, BOOLEAN, STRING, STRING)
+    DEFINE st base.StringTokenizer
+    DEFINE opt, key, val STRING
+    DEFINE eq INTEGER
+
+    LET st = base.StringTokenizer.create(inner, ";")
+    WHILE st.hasMoreTokens()
+        LET opt = st.nextToken().trim()
+        IF opt.getLength() == 0 THEN CONTINUE WHILE END IF
+        LET eq = opt.getIndexOf("=", 1)
+        IF eq <= 0 THEN
+            RETURN xi.*, FALSE, "NotImplemented",
+                SFMT("Unsupported $expand option '%1' in v0", opt)
+        END IF
+        LET key = opt.subString(1, eq - 1).trim().toLowerCase()
+        LET val = opt.subString(eq + 1, opt.getLength())
+        IF key == "$select" THEN
+            CALL splitList(val) RETURNING xi.selectList
+        ELSE
+            RETURN xi.*, FALSE, "NotImplemented",
+                SFMT("The $expand option '%1' is not supported in v0", key)
+        END IF
+    END WHILE
+    RETURN xi.*, TRUE, NULL, NULL
+END FUNCTION
+
+# Split a comma-separated $expand list, keeping commas inside parentheses (a
+# nested $select list) attached to their item.
+PRIVATE FUNCTION splitExpandItems(s STRING) RETURNS DYNAMIC ARRAY OF STRING
+    DEFINE out DYNAMIC ARRAY OF STRING
+    DEFINE buf base.StringBuffer
+    DEFINE i, depth INTEGER
+    DEFINE c STRING
+
+    LET buf = base.StringBuffer.create()
+    FOR i = 1 TO s.getLength()
+        LET c = s.getCharAt(i)
+        CASE
+            WHEN c == "("
+                LET depth = depth + 1
+                CALL buf.append(c)
+            WHEN c == ")"
+                LET depth = depth - 1
+                CALL buf.append(c)
+            WHEN c == "," AND depth == 0
+                LET out[out.getLength() + 1] = buf.toString()
+                CALL buf.clear()
+            OTHERWISE
+                CALL buf.append(c)
+        END CASE
+    END FOR
+    LET out[out.getLength() + 1] = buf.toString()
+    RETURN out
 END FUNCTION
 
 # ---------------------------------------------------------------------------
@@ -265,6 +381,7 @@ END FUNCTION
 PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
     DEFINE f ODataTypes.T_ODataFilter
     DEFINE fn, op, rawLit STRING
+    DEFINE pp INTEGER
 
     INITIALIZE f.* TO NULL
     LET fn = m_tokens[m_tpos].toLowerCase()
@@ -293,6 +410,33 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
         RETURN 0
     END IF
     LET op = m_tokens[m_tpos + 1].toLowerCase()
+
+    # in-list form: property in ( lit, lit, ... )
+    IF op == "in" THEN
+        IF m_tokens[m_tpos + 2] != "(" THEN
+            LET m_perr = "Expected '(' after 'in' in $filter"
+            RETURN 0
+        END IF
+        LET f.property = m_tokens[m_tpos]
+        LET f.operator = "in"
+        LET pp = m_tpos + 3
+        WHILE pp <= m_tokens.getLength()
+            IF m_tokens[pp] == ")" THEN EXIT WHILE END IF
+            IF m_tokens[pp] == "," THEN
+                LET pp = pp + 1
+                CONTINUE WHILE
+            END IF
+            LET f.values[f.values.getLength() + 1] = stripQuotes(m_tokens[pp])
+            LET pp = pp + 1
+        END WHILE
+        IF pp > m_tokens.getLength() THEN
+            LET m_perr = "Expected ')' to close 'in' list in $filter"
+            RETURN 0
+        END IF
+        LET m_tpos = pp + 1
+        RETURN addPred(f)
+    END IF
+
     CASE op
         WHEN "eq"
         WHEN "ne"

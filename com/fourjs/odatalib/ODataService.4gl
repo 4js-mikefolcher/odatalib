@@ -29,6 +29,7 @@ IMPORT FGL com.fourjs.odatalib.ODataTypes
 IMPORT FGL com.fourjs.odatalib.ODataConfig
 IMPORT FGL com.fourjs.odatalib.ODataQuery
 IMPORT FGL com.fourjs.odatalib.ODataProvider
+IMPORT FGL com.fourjs.odatalib.ODataExpand
 IMPORT FGL com.fourjs.odatalib.ODataSerializer
 IMPORT FGL com.fourjs.odatalib.ODataError
 IMPORT FGL com.fourjs.odatalib.ODataAuth
@@ -52,6 +53,13 @@ PUBLIC FUNCTION register(serviceName STRING)
 END FUNCTION
 
 #+ Run the web service engine processing loop until disconnect / interrupt.
+#+
+#+ Only -2 (app server disconnected), -4 (Ctrl-C) and -10 (internal error)
+#+ terminate the DVM. Per-request / per-connection codes such as -3 (client
+#+ connection lost) and other transient values (e.g. the -32 the GAS proxy
+#+ returns between requests) are NOT fatal: the DVM keeps serving so the GAS
+#+ pool can reuse it. Returning on those churns the pool and starves the
+#+ service under load.
 PUBLIC FUNCTION run() RETURNS STRING
     DEFINE status INTEGER
     CALL com.WebServiceEngine.Start()
@@ -62,19 +70,15 @@ PUBLIC FUNCTION run() RETURNS STRING
             WHEN 0
                 # request processed
             WHEN -1
-                # timeout (not expected with -1)
+                # timeout (not expected with the -1 blocking wait)
             WHEN -2
                 RETURN "Disconnected from application server."
-            WHEN -3
-                RETURN "Client connection lost."
             WHEN -4
                 RETURN "Server interrupted with Ctrl-C."
             WHEN -10
                 RETURN "Internal server error."
             OTHERWISE
-                IF status < 0 THEN
-                    RETURN SFMT("Web service engine error %1.", status)
-                END IF
+                # -3, -9 and other transient/per-connection codes: keep serving.
         END CASE
         IF int_flag THEN
             LET int_flag = FALSE
@@ -150,6 +154,8 @@ PUBLIC FUNCTION getEntitySet(
     DEFINE baseUrl, nextLink, name, keyVal STRING
     DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
     DEFINE resp util.JSONObject
+    DEFINE eok BOOLEAN
+    DEFINE ecode, emsg STRING
 
     LET baseUrl = serviceBaseUrl()
 
@@ -196,6 +202,20 @@ PUBLIC FUNCTION getEntitySet(
             CALL ODataError.raiseCode(result.errorCode, result.errorMessage)
             RETURN NULL
         END IF
+        # $expand on a single entity (other options are not applied to a key get).
+        IF pExpand IS NOT NULL AND pExpand.getLength() > 0 THEN
+            LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, pExpand)
+            IF NOT q.ok THEN
+                CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
+                RETURN NULL
+            END IF
+            CALL ODataExpand.apply(ent, q.expand, result.rows)
+                RETURNING eok, ecode, emsg
+            IF NOT eok THEN
+                CALL ODataError.raiseCode(ecode, emsg)
+                RETURN NULL
+            END IF
+        END IF
         LET resp = ODataSerializer.buildEntity(baseUrl, name, result)
         IF resp IS NULL THEN
             CALL ODataError.raiseCode("NotFound",
@@ -213,16 +233,30 @@ PUBLIC FUNCTION getEntitySet(
         RETURN NULL
     END IF
 
+    # Make sure the navigation join keys are fetched even under a narrow $select.
+    IF q.expand.getLength() > 0 THEN
+        LET q.selectList = ODataExpand.ensureJoinKeys(ent, q.expand, q.selectList)
+    END IF
+
     LET result = ODataProvider.fetch(ent, q)
     IF NOT result.ok THEN
         CALL ODataError.raiseCode(result.errorCode, result.errorMessage)
         RETURN NULL
     END IF
 
+    IF q.expand.getLength() > 0 THEN
+        CALL ODataExpand.apply(ent, q.expand, result.rows)
+            RETURNING eok, ecode, emsg
+        IF NOT eok THEN
+            CALL ODataError.raiseCode(ecode, emsg)
+            RETURN NULL
+        END IF
+    END IF
+
     IF result.hasMore THEN
         LET nextLink = buildNextLink(baseUrl, name,
             q.skip + result.rows.getLength(),
-            pSelect, pFilter, pOrderby, pCount)
+            pSelect, pFilter, pOrderby, pCount, pExpand)
     END IF
 
     RETURN ODataSerializer.buildCollection(
@@ -423,7 +457,8 @@ PRIVATE FUNCTION buildNextLink(
     pSelect STRING,
     pFilter STRING,
     pOrderby STRING,
-    pCount STRING)
+    pCount STRING,
+    pExpand STRING)
     RETURNS STRING
     DEFINE buf base.StringBuffer
 
@@ -440,6 +475,9 @@ PRIVATE FUNCTION buildNextLink(
     END IF
     IF pCount IS NOT NULL AND pCount.getLength() > 0 THEN
         CALL buf.append(SFMT("&$count=%1", urlEncode(pCount)))
+    END IF
+    IF pExpand IS NOT NULL AND pExpand.getLength() > 0 THEN
+        CALL buf.append(SFMT("&$expand=%1", urlEncode(pExpand)))
     END IF
     RETURN buf.toString()
 END FUNCTION

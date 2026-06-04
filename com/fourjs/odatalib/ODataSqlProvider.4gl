@@ -100,6 +100,11 @@ PUBLIC FUNCTION fetch(
     IF query.hasTop AND query.top < pageSize THEN
         LET effLimit = query.top
     END IF
+    # $expand's batched fetch needs all matching rows (up to a cap), not a server
+    # page — maxRows overrides the page limit and suppresses the nextLink probe.
+    IF query.maxRows > 0 THEN
+        LET effLimit = query.maxRows
+    END IF
 
     LET sql = SFMT("SELECT %1 FROM %2%3%4",
         selectClause, entity.source, whereClause, orderClause)
@@ -136,8 +141,9 @@ PUBLIC FUNCTION fetch(
         END WHILE
 
         # A further server page exists only when we filled a full server page
-        # (not when the client capped the result with a small $top).
-        IF fetched == effLimit AND effLimit == pageSize THEN
+        # (not when the client capped the result with a small $top, and never on
+        # a maxRows expand fetch).
+        IF query.maxRows == 0 AND fetched == effLimit AND effLimit == pageSize THEN
             CALL sqlObj.fetchAbsolute(pos)
             IF sqlca.sqlcode != NOTFOUND THEN
                 LET res.hasMore = TRUE
@@ -385,6 +391,13 @@ PRIVATE FUNCTION appendPredicate(
         RETURN
     END IF
 
+    # `in` (value list): (col IN (?,?,...)) with one type-aware bind per value.
+    # An empty list can never match, so emit a guaranteed-false predicate.
+    IF flt.operator == "in" THEN
+        CALL appendInPredicate(col, prop.edmType, flt.values)
+        RETURN
+    END IF
+
     LET boundVal = flt.value
     # Comparisons bind as the column's declared Edm type so the driver sends a
     # correctly-typed SQL parameter; LIKE patterns are always textual. For the
@@ -434,6 +447,35 @@ PRIVATE FUNCTION appendPredicate(
     LET n = m_whereParams.getLength() + 1
     LET m_whereParams[n].value = boundVal
     LET m_whereParams[n].edmType = bindType
+END FUNCTION
+
+# Emit (col IN (?,?,...)) into m_whereBuf, binding each value type-aware against
+# edmType. An empty list yields a guaranteed-false predicate (so an empty parent
+# page expands to no related rows). Sets m_whereErr on a bad literal.
+PRIVATE FUNCTION appendInPredicate(
+    col STRING, edmType STRING, values DYNAMIC ARRAY OF STRING)
+    DEFINE k, n INTEGER
+    DEFINE vok BOOLEAN
+    DEFINE vmsg STRING
+
+    IF values.getLength() == 0 THEN
+        CALL m_whereBuf.append("(1=0)")
+        RETURN
+    END IF
+    CALL m_whereBuf.append(SFMT("(%1 IN (", col))
+    FOR k = 1 TO values.getLength()
+        CALL validateLiteral(edmType, values[k]) RETURNING vok, vmsg
+        IF NOT vok THEN
+            LET m_whereErr = vmsg
+            RETURN
+        END IF
+        IF k > 1 THEN CALL m_whereBuf.append(",") END IF
+        CALL m_whereBuf.append("?")
+        LET n = m_whereParams.getLength() + 1
+        LET m_whereParams[n].value = values[k]
+        LET m_whereParams[n].edmType = edmType
+    END FOR
+    CALL m_whereBuf.append("))")
 END FUNCTION
 
 # Returns: " ORDER BY ..." clause (or ""), ok, error.

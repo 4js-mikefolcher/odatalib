@@ -66,6 +66,15 @@ PUBLIC FUNCTION getNamespace() RETURNS STRING
     RETURN m_schema.namespace
 END FUNCTION
 
+#+ Per-service cap on rows fetched while materialising a single $expand
+#+ (default 10000 when not configured).
+PUBLIC FUNCTION getExpandMaxRows() RETURNS INTEGER
+    IF m_schema.expandMaxRows > 0 THEN
+        RETURN m_schema.expandMaxRows
+    END IF
+    RETURN 10000
+END FUNCTION
+
 PUBLIC FUNCTION getEntityCount() RETURNS INTEGER
     RETURN m_schema.entities.getLength()
 END FUNCTION
@@ -84,6 +93,21 @@ PUBLIC FUNCTION findEntity(entitySet STRING)
     FOR i = 1 TO m_schema.entities.getLength()
         IF m_schema.entities[i].name == entitySet THEN
             RETURN m_schema.entities[i].*, TRUE
+        END IF
+    END FOR
+    RETURN empty.*, FALSE
+END FUNCTION
+
+#+ Resolve a navigation property of an entity by name.
+#+ found is FALSE when no such navigation property is declared.
+PUBLIC FUNCTION findNavigation(
+    entity ODataTypes.T_ODataEntity, navName STRING)
+    RETURNS (ODataTypes.T_ODataNavigation, BOOLEAN)
+    DEFINE i INTEGER
+    DEFINE empty ODataTypes.T_ODataNavigation
+    FOR i = 1 TO entity.navigation.getLength()
+        IF entity.navigation[i].name == navName THEN
+            RETURN entity.navigation[i].*, TRUE
         END IF
     END FOR
     RETURN empty.*, FALSE

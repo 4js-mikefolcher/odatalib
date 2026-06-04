@@ -1,6 +1,7 @@
 {
   "service": "northwind",
   "namespace": "Northwind",
+  "expandMaxRows": 10000,
   "entities": [
     {
       "name": "Customers",
@@ -17,6 +18,9 @@
         { "name": "Region",       "column": "region",       "type": "Edm.String" },
         { "name": "Country",      "column": "country",      "type": "Edm.String" },
         { "name": "Phone",        "column": "phone",        "type": "Edm.String" }
+      ],
+      "navigation": [
+        { "name": "Orders", "target": "Orders", "kind": "many", "on": [{ "from": "CustomerID", "to": "CustomerID" }] }
       ]
     },
     {
@@ -35,6 +39,10 @@
         { "name": "Freight",      "column": "freight",      "type": "Edm.Single" },
         { "name": "ShipCountry",  "column": "shipcountry",  "type": "Edm.String" },
         { "name": "ShipCity",     "column": "shipcity",     "type": "Edm.String" }
+      ],
+      "navigation": [
+        { "name": "Customer",     "target": "Customers",    "kind": "one",  "on": [{ "from": "CustomerID", "to": "CustomerID" }] },
+        { "name": "OrderDetails", "target": "OrderDetails", "kind": "many", "on": [{ "from": "OrderID", "to": "OrderID" }] }
       ]
     },
     {
@@ -49,6 +57,10 @@
         { "name": "UnitPrice", "column": "unitprice", "type": "Edm.Double" },
         { "name": "Quantity",  "column": "quantity",  "type": "Edm.Int16" },
         { "name": "Discount",  "column": "discount",  "type": "Edm.Double" }
+      ],
+      "navigation": [
+        { "name": "Order",   "target": "Orders",   "kind": "one", "on": [{ "from": "OrderID", "to": "OrderID" }] },
+        { "name": "Product", "target": "Products", "kind": "one", "on": [{ "from": "ProductID", "to": "ProductID" }] }
       ]
     },
     {
@@ -66,6 +78,10 @@
         { "name": "UnitPrice",    "column": "unitprice",    "type": "Edm.Single" },
         { "name": "UnitsInStock", "column": "unitsinstock", "type": "Edm.Int16" },
         { "name": "Discontinued", "column": "discontinued", "type": "Edm.Int32" }
+      ],
+      "navigation": [
+        { "name": "Category", "target": "Categories", "kind": "one", "on": [{ "from": "CategoryID", "to": "CategoryID" }] },
+        { "name": "Supplier", "target": "Suppliers",  "kind": "one", "on": [{ "from": "SupplierID", "to": "SupplierID" }] }
       ]
     },
     {
@@ -79,6 +95,9 @@
         { "name": "CategoryID",   "column": "categoryid",   "type": "Edm.Int32", "key": true },
         { "name": "CategoryName", "column": "categoryname", "type": "Edm.String" },
         { "name": "Description",  "column": "description",  "type": "Edm.String" }
+      ],
+      "navigation": [
+        { "name": "Products", "target": "Products", "kind": "many", "on": [{ "from": "CategoryID", "to": "CategoryID" }] }
       ]
     },
     {
@@ -93,6 +112,9 @@
         { "name": "CompanyName",  "column": "companyname",  "type": "Edm.String" },
         { "name": "City",         "column": "city",         "type": "Edm.String" },
         { "name": "Country",      "column": "country",      "type": "Edm.String" }
+      ],
+      "navigation": [
+        { "name": "Products", "target": "Products", "kind": "many", "on": [{ "from": "SupplierID", "to": "SupplierID" }] }
       ]
     },
     {

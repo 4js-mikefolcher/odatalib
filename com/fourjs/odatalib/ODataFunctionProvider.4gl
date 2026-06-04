@@ -92,6 +92,10 @@ PUBLIC FUNCTION fetch(
     IF query.hasTop AND query.top < pageSize THEN
         LET effLimit = query.top
     END IF
+    # $expand batched fetch: take all the callback's rows up to the cap.
+    IF query.maxRows > 0 THEN
+        LET effLimit = query.maxRows
+    END IF
 
     LET res.ok = TRUE
     LET res.rows = util.JSONArray.create()
