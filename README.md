@@ -302,9 +302,11 @@ serialisation. This is the dataset used to verify the type-aware binding and
 `LIKE`-escaping fixes noted under [Limitations & roadmap](#limitations--roadmap).
 
 To serve this dataset over GAS (e.g. to exercise composite-key URLs live),
-`examples/NorthwindPgService.4gl` + `examples/resources/northwind-pg.xcf` are the
-PostgreSQL counterparts of the SQLite `NorthwindService` — they connect via
-`FGLPROFILE` and serve `northwind-pg.odata`.
+`examples/NorthwindPgService.4gl` is the PostgreSQL counterpart of the SQLite
+`NorthwindService` — it connects via `FGLPROFILE` and serves `northwind-pg.odata`.
+Pair it with a deployment descriptor created from the template under
+[GAS deployment](#gas-deployment--verification-status) (the `.xcf` files are
+gitignored because they bake in an absolute project path).
 
 ## Consuming from Power BI
 
@@ -317,14 +319,36 @@ periodic refresh (the recommended pattern for OData BI).
 
 ## GAS deployment & verification status
 
-Verified end-to-end on **GAS 6.00.01** (standalone `httpdispatch`) with
-[`examples/resources/northwind.xcf`](examples/resources/northwind.xcf). Confirmed live:
+Verified end-to-end on **GAS 6.00.01** (standalone `httpdispatch`). Confirmed live:
 
 - Routing precedence — literal `/$metadata` and `/` win over `/{entitySet}` ✅
 - Single-segment key parse — `Customers('ALFKI')` / `CountrySummary('Germany')` ✅
 - `$`-prefixed options — `$top`/`$skip`/`$count`/`$filter` (incl. `contains`)/`$orderby`/`$select` ✅
+- Combined options in one URL — `$filter`+`$expand`(nested `$select`)+`$orderby`+`$count`+`$top`, against single- and composite-key entities ✅
 - Both providers (SQL + function) over HTTP ✅
-- OData error envelopes with correct HTTP status (400/404) ✅
+- OData error envelopes with correct HTTP status (400/404/501) ✅
+
+**Deployment descriptor.** The `.xcf` files are gitignored (they bake in an
+absolute project path). Create `examples/resources/northwind.xcf` from this
+template, editing `odata.project.dir` to your checkout:
+
+```xml
+<?xml version="1.0" encoding="UTF-8" ?>
+<APPLICATION Parent="ws.default"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:noNamespaceSchemaLocation="https://4js.com/ns/gas/6.00/cfextws.xsd">
+  <RESOURCE Id="odata.project.dir" Source="INTERNAL">/path/to/odatalib</RESOURCE>
+  <EXECUTION>
+    <ENVIRONMENT_VARIABLE Id="FGLLDPATH" Concat="APPEND">$(odata.project.dir):$(odata.project.dir)/examples</ENVIRONMENT_VARIABLE>
+    <ENVIRONMENT_VARIABLE Id="FGLPROFILE">$(odata.project.dir)/examples/fglprofile</ENVIRONMENT_VARIABLE>
+    <ENVIRONMENT_VARIABLE Id="ODATA_CONFIG">$(odata.project.dir)/examples/northwind-pg.odata</ENVIRONMENT_VARIABLE>
+    <PATH>$(odata.project.dir)/examples</PATH>
+    <MODULE>NorthwindPgService</MODULE>
+    <ACCESS_CONTROL><ALLOW_FROM>ALL</ALLOW_FROM></ACCESS_CONTROL>
+    <POOL><START>2</START><MIN_AVAILABLE>2</MIN_AVAILABLE><MAX_AVAILABLE>5</MAX_AVAILABLE></POOL>
+  </EXECUTION>
+</APPLICATION>
+```
 
 To run it yourself:
 
@@ -333,7 +357,9 @@ export FGLASDIR="…/Genero Studio …/Contents/Resources/gas"
 "$FGLASDIR/bin/httpdispatch" -p "$FGLASDIR" \
   -E res.appdata.path=/tmp/odata-gas \
   -E res.path.services=$PWD/examples/resources
+# Encode spaces in query options as %20 — curl sends raw spaces in the request line otherwise.
 curl 'http://localhost:6394/ws/r/northwind/northwind/Customers?$top=10&$count=true'
+curl 'http://localhost:6394/ws/r/northwind/northwind/Orders?$filter=ShipCountry%20eq%20%27France%27&$top=3'
 ```
 
 **Note on `$metadata` content type:** GAS streams the CSDL document (via

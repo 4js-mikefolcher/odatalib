@@ -18,6 +18,10 @@ dist/
 CLAUDE.md
 .mcp.json
 
+# GAS deployment descriptors — they bake in an absolute project path, so each
+# checkout keeps its own. See README "GAS deployment" for the template.
+examples/resources/*.xcf
+
 # Editor / OS noise
 .DS_Store
 *.swp
