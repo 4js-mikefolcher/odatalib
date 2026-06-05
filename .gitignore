@@ -13,10 +13,12 @@ build/
 dist/
 *.fgz
 
-# Local Claude Code settings (machine-specific permission allowlists)
+# Local agent / tooling settings (machine-specific)
 .claude/
 CLAUDE.md
 .mcp.json
+.codex/
+AGENTS.md
 
 # GAS deployment descriptors — they bake in an absolute project path, so each
 # checkout keeps its own. See README "GAS deployment" for the template.
