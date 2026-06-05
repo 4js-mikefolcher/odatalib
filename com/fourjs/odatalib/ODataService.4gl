@@ -209,7 +209,7 @@ PUBLIC FUNCTION getEntitySet(
                 CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
                 RETURN NULL
             END IF
-            CALL ODataExpand.apply(ent, q.expand, result.rows)
+            CALL ODataExpand.apply(ent, q, result.rows)
                 RETURNING eok, ecode, emsg
             IF NOT eok THEN
                 CALL ODataError.raiseCode(ecode, emsg)
@@ -234,8 +234,8 @@ PUBLIC FUNCTION getEntitySet(
     END IF
 
     # Make sure the navigation join keys are fetched even under a narrow $select.
-    IF q.expand.getLength() > 0 THEN
-        LET q.selectList = ODataExpand.ensureJoinKeys(ent, q.expand, q.selectList)
+    IF q.expandRoots.getLength() > 0 THEN
+        LET q.selectList = ODataExpand.ensureJoinKeys(ent, q, q.selectList)
     END IF
 
     LET result = ODataProvider.fetch(ent, q)
@@ -244,8 +244,8 @@ PUBLIC FUNCTION getEntitySet(
         RETURN NULL
     END IF
 
-    IF q.expand.getLength() > 0 THEN
-        CALL ODataExpand.apply(ent, q.expand, result.rows)
+    IF q.expandRoots.getLength() > 0 THEN
+        CALL ODataExpand.apply(ent, q, result.rows)
             RETURNING eok, ecode, emsg
         IF NOT eok THEN
             CALL ODataError.raiseCode(ecode, emsg)

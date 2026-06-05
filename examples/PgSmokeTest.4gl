@@ -16,6 +16,7 @@ IMPORT FGL com.fourjs.odatalib.ODataConfig
 IMPORT FGL com.fourjs.odatalib.ODataQuery
 IMPORT FGL com.fourjs.odatalib.ODataProvider
 IMPORT FGL com.fourjs.odatalib.ODataSerializer
+IMPORT FGL com.fourjs.odatalib.ODataExpand
 IMPORT FGL com.fourjs.odatalib.ODataFunctionProvider
 IMPORT FGL NorthwindFunctions
 
@@ -79,8 +80,73 @@ MAIN
     DISPLAY "\n== CountrySummary?$count=true  (function provider) =="
     CALL showCollection(ent, NULL, NULL, "5", NULL, "true", NULL)
 
+    # --- richer $expand: nested options ---------------------------------------
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    DISPLAY "\n== Customers(ALFKI) $expand=Orders($orderby=OrderDate desc;$top=3;$select=OrderID)  (expect 11103,11011,10952) =="
+    CALL showExpand(ent, "CustomerID", "CustomerID eq 'ALFKI'", NULL,
+        "Orders($orderby=OrderDate desc;$top=3;$select=OrderID)")
+
+    DISPLAY "\n== Customers(ALFKI) $expand=Orders($filter=Freight gt 50;$select=OrderID,Freight)  (expect 2 orders) =="
+    CALL showExpand(ent, "CustomerID", "CustomerID eq 'ALFKI'", NULL,
+        "Orders($filter=Freight gt 50;$select=OrderID,Freight)")
+
+    DISPLAY "\n== Customers(ALFKI) $expand=Orders($count=true;$top=2;$select=OrderID)  (expect Orders@odata.count=7, 2 rows) =="
+    CALL showExpand(ent, "CustomerID", "CustomerID eq 'ALFKI'", NULL,
+        "Orders($count=true;$top=2;$select=OrderID)")
+
+    # --- richer $expand: multi-level ------------------------------------------
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    DISPLAY "\n== Orders(10248) $expand=OrderDetails($expand=Product($select=ProductName))  (2-level, 3 details) =="
+    CALL showExpand(ent, "OrderID", "OrderID eq 10248", NULL,
+        "OrderDetails($expand=Product($select=ProductName))")
+
+    # --- richer $expand: error paths ------------------------------------------
+    DISPLAY "\n== Orders(10248) $expand=OrderDetails($search=x)  (expect 501) =="
+    CALL showExpand(ent, "OrderID", "OrderID eq 10248", NULL, "OrderDetails($search=x)")
+
+    DISPLAY "\n== Orders(10248) $expand=OrderDetails($expand=Product($expand=Category($expand=Products)))  (expect depth 501) =="
+    CALL showExpand(ent, "OrderID", "OrderID eq 10248", NULL,
+        "OrderDetails($expand=Product($expand=Category($expand=Products)))")
+
     DISCONNECT CURRENT
 END MAIN
+
+#+ Parse $select/$filter/$top/$expand, fetch the collection, apply expansion
+#+ in-process, and print the serialised result (or the parse/expand error).
+FUNCTION showExpand(
+    ent ODataTypes.T_ODataEntity,
+    pSelect STRING, pFilter STRING, pTop STRING, pExpand STRING)
+    DEFINE q ODataTypes.T_ODataQuery
+    DEFINE result ODataTypes.T_ODataResult
+    DEFINE obj util.JSONObject
+    DEFINE eok BOOLEAN
+    DEFINE ecode, emsg STRING
+
+    LET q = ODataQuery.parse(pSelect, pFilter, pTop, NULL, NULL, NULL, pExpand)
+    IF NOT q.ok THEN
+        DISPLAY SFMT("  query error [%1]: %2", q.errorCode, q.errorMessage)
+        RETURN
+    END IF
+    IF q.expandRoots.getLength() > 0 THEN
+        LET q.selectList = ODataExpand.ensureJoinKeys(ent, q, q.selectList)
+    END IF
+    LET result = ODataProvider.fetch(ent, q)
+    IF NOT result.ok THEN
+        DISPLAY SFMT("  provider error [%1]: %2",
+            result.errorCode, result.errorMessage)
+        RETURN
+    END IF
+    IF q.expandRoots.getLength() > 0 THEN
+        CALL ODataExpand.apply(ent, q, result.rows) RETURNING eok, ecode, emsg
+        IF NOT eok THEN
+            DISPLAY SFMT("  expand error [%1]: %2", ecode, emsg)
+            RETURN
+        END IF
+    END IF
+    LET obj = ODataSerializer.buildCollection(
+        baseUrl, ent.name, result, q.wantCount, NULL)
+    DISPLAY obj.toString()
+END FUNCTION
 
 FUNCTION showCollection(
     ent ODataTypes.T_ODataEntity,

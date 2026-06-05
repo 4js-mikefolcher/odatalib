@@ -75,6 +75,15 @@ PUBLIC FUNCTION getExpandMaxRows() RETURNS INTEGER
     RETURN 10000
 END FUNCTION
 
+#+ Per-service cap on $expand nesting depth (default 3 when not configured).
+#+ A request whose $expand nests deeper than this returns 501 NotImplemented.
+PUBLIC FUNCTION getExpandMaxDepth() RETURNS INTEGER
+    IF m_schema.expandMaxDepth > 0 THEN
+        RETURN m_schema.expandMaxDepth
+    END IF
+    RETURN 3
+END FUNCTION
+
 PUBLIC FUNCTION getEntityCount() RETURNS INTEGER
     RETURN m_schema.entities.getLength()
 END FUNCTION

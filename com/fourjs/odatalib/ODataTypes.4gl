@@ -58,6 +58,7 @@ PUBLIC TYPE T_ODataSchema RECORD
     service STRING,                                # OData service name
     namespace STRING,                              # CSDL namespace
     expandMaxRows INTEGER,                          # cap on rows fetched per $expand (0 -> default)
+    expandMaxDepth INTEGER,                         # cap on $expand nesting depth (0 -> default)
     entities DYNAMIC ARRAY OF T_ODataEntity
 END RECORD
 
@@ -93,13 +94,6 @@ PUBLIC TYPE T_ODataOrderBy RECORD
     descending BOOLEAN
 END RECORD
 
-# One parsed $expand item: a navigation property name and an optional nested
-# $select projecting the expanded entity (empty selectList => all properties).
-PUBLIC TYPE T_ODataExpandItem RECORD
-    path STRING,
-    selectList DYNAMIC ARRAY OF STRING
-END RECORD
-
 # One node of the parsed $filter expression tree. Nodes live in a flat pool
 # (T_ODataQuery.filterNodes) and reference their children by 1-based pool index,
 # so the RECORD need not contain itself (BDL has no recursive types):
@@ -115,6 +109,31 @@ PUBLIC TYPE T_ODataFilterNode RECORD
     right INTEGER
 END RECORD
 
+# One node of the parsed $expand forest. A nested $expand cannot be modelled by
+# embedding a T_ODataQuery (which itself contains the expand list -> illegal
+# self-reference in BDL), so the whole forest is flattened into a pool
+# (T_ODataQuery.expandNodes) and children are referenced by 1-based pool index
+# (childRoots) -- the same technique the $filter tree uses (filterNodes). Each
+# node carries the nested query options that apply to its target entity:
+#   selectList  -> nested $select  (empty => all target properties)
+#   orderby     -> nested $orderby (ordered before per-parent slicing)
+#   filterNodes/filterRoot -> nested $filter tree (target-relative; 0 => none)
+#   top/skip/hasTop        -> nested $top/$skip, applied PER PARENT at stitch
+#   wantCount              -> nested $count -> "<nav>@odata.count" annotation
+#   childRoots             -> nested $expand items (indices into expandNodes)
+PUBLIC TYPE T_ODataExpandNode RECORD
+    path STRING,
+    selectList DYNAMIC ARRAY OF STRING,
+    orderby DYNAMIC ARRAY OF T_ODataOrderBy,
+    filterNodes DYNAMIC ARRAY OF T_ODataFilterNode,
+    filterRoot INTEGER,
+    top INTEGER,
+    skip INTEGER,
+    hasTop BOOLEAN,
+    wantCount BOOLEAN,
+    childRoots DYNAMIC ARRAY OF INTEGER
+END RECORD
+
 # The full parsed set of query options for a collection request.
 PUBLIC TYPE T_ODataQuery RECORD
     selectList DYNAMIC ARRAY OF STRING,
@@ -127,7 +146,10 @@ PUBLIC TYPE T_ODataQuery RECORD
     filterNodes DYNAMIC ARRAY OF T_ODataFilterNode,
     filterRoot INTEGER,
     orderby DYNAMIC ARRAY OF T_ODataOrderBy,
-    expand DYNAMIC ARRAY OF T_ODataExpandItem,
+    # Parsed $expand as a flat node forest: expandNodes is the pool (all levels),
+    # expandRoots holds the indices of the top-level expand items. 0/empty => none.
+    expandNodes DYNAMIC ARRAY OF T_ODataExpandNode,
+    expandRoots DYNAMIC ARRAY OF INTEGER,
     top INTEGER,
     skip INTEGER,
     hasTop BOOLEAN,

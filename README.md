@@ -66,11 +66,19 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 - `$count=true` — total count via `@odata.count`
 - Server-driven paging — `@odata.nextLink`, default page size 200, cap 1000
   (per-entity `pageSize`)
-- `$expand` — one-level, to-one and to-many navigation properties, with an
-  optional nested `$select`. Backed by declared relationships (see
-  [The `.odata` configuration file](#the-odata-configuration-file)) and
-  materialised with one batched query per expanded property. Nested
-  `$filter`/`$top`/`$orderby`, multi-level expand and `$expand=*` return `501`.
+- `$expand` — to-one and to-many navigation properties, backed by declared
+  relationships (see [The `.odata` configuration file](#the-odata-configuration-file))
+  and materialised with one batched query per expanded property (no N+1).
+  Supports:
+  - **Nested options** inside an expand item: `$select`, `$filter`, `$orderby`,
+    `$top`, `$skip`, `$count` — e.g.
+    `Orders($filter=Freight gt 50;$orderby=OrderDate desc;$top=3;$count=true)`.
+    `$top`/`$skip` apply **per parent**; `$count` emits `"<nav>@odata.count"`.
+  - **Multi-level** expand — `$expand=Orders($expand=OrderDetails($expand=Product))`,
+    bounded by the per-service `expandMaxDepth` (default 3).
+
+  `$expand=*`, `$compute`/`$search`/`$apply`/`$levels`/lambda inside a nested
+  option, and composite-column joins return `501`.
 
 Malformed options return a `400 BadRequest`; unsupported-but-recognised
 constructs return `501 NotImplemented`; both as OData error envelopes.
@@ -372,8 +380,7 @@ including Power BI; the body is well-formed CSDL.
 
 **Not yet implemented (v0 scope):**
 - `$batch`, `$apply`, lambda operators (`any`/`all`), delta/change-tracking,
-  actions/functions; multi-level `$expand` and nested expand options beyond
-  `$select`
+  actions/functions; `$expand=*` and `$levels`
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
@@ -410,15 +417,25 @@ including Power BI; the body is well-formed CSDL.
   `OrderDetails(OrderID=10248,ProductID=11)` (and named/unnamed single keys);
   `$metadata` emits one `<PropertyRef>` per key part. A wrong arity or non-key
   name returns a clean `400`. Verified on live GAS against PostgreSQL.
-- *`$expand` (one level).* Declared `navigation` relationships are materialised
-  into the response — to-one as a nested object, to-many as a nested array — with
-  an optional nested `$select`. Expansion runs above the providers: the parent
-  rows' join keys drive a single batched `in (…)` query against the target
-  entity's provider, then rows are stitched back by key (so it works across the
-  SQL/function boundary). `$metadata` advertises the relationships as
-  `<NavigationProperty>`. A new `in` filter operator backs this and is exposed in
-  `$filter`. The per-service `expandMaxRows` (default 10000) caps the related
-  fetch.
+- *`$expand`.* Declared `navigation` relationships are materialised into the
+  response — to-one as a nested object, to-many as a nested array. Expansion runs
+  above the providers: the parent rows' join keys drive a single batched `in (…)`
+  query against the target entity's provider, then rows are stitched back by key
+  (so it works across the SQL/function boundary). `$metadata` advertises the
+  relationships as `<NavigationProperty>`. A new `in` filter operator backs this
+  and is exposed in `$filter`. The per-service `expandMaxRows` (default 10000)
+  caps the related fetch.
+- *Richer `$expand` — nested options + multi-level.* Inside an expand item,
+  `$select`/`$filter`/`$orderby`/`$top`/`$skip`/`$count` are all supported
+  (e.g. `Orders($filter=Freight gt 50;$orderby=OrderDate desc;$top=3;$count=true)`).
+  Nested `$top`/`$skip` apply **per parent** (fetch the ordered batch once, slice
+  each parent's array at stitch — no N+1); nested `$count` emits a
+  `"<nav>@odata.count"` annotation reflecting the per-parent total before paging.
+  Multi-level expand (`$expand=Orders($expand=OrderDetails($expand=Product))`)
+  recurses over the shared nested JSON, bounded by the per-service `expandMaxDepth`
+  (default 3; deeper → `501`). The `$expand` forest is parsed into a flat node
+  pool (the same index-pool technique as the `$filter` tree, since BDL has no
+  recursive types). Verified on live GAS against PostgreSQL.
 - *Service loop lifecycle.* `ODataService.run()` now only terminates the DVM on
   `-2` / `-4` / `-10` (per the documented engine contract); transient
   per-connection codes such as `-3` no longer end the process, so the GAS pool

@@ -33,6 +33,13 @@ PRIVATE DEFINE m_tpos INTEGER                                  # parser cursor
 PRIVATE DEFINE m_nodes DYNAMIC ARRAY OF ODataTypes.T_ODataFilterNode
 PRIVATE DEFINE m_perr STRING                                   # parse error (NULL = ok)
 
+# Scratch state for the $expand forest parser. Nodes (all nesting levels) are
+# appended to m_expandNodes and referenced by 1-based index; parseExpand commits
+# the pool into the query. m_expandErr/m_expandCode carry a parse failure.
+PRIVATE DEFINE m_expandNodes DYNAMIC ARRAY OF ODataTypes.T_ODataExpandNode
+PRIVATE DEFINE m_expandErr STRING                             # parse error (NULL = ok)
+PRIVATE DEFINE m_expandCode STRING                           # BadRequest | NotImplemented
+
 #+ Parse the supported query options into a normalised T_ODataQuery.
 #+ Any argument may be NULL (option absent).
 PUBLIC FUNCTION parse(
@@ -141,89 +148,216 @@ END FUNCTION
 # ---------------------------------------------------------------------------
 # $expand
 #
-# Grammar (v1): item ( ',' item )*, item = NAME [ '(' '$select' '=' props ')' ].
-# A bare NAME expands all target properties; the only supported nested option is
-# $select. Any other nested option, nested $expand, or '*' => 501.
+# Grammar:
+#     $expand = item ( ',' item )*
+#     item    = NAME [ '(' option ( ';' option )* ')' ]
+#     option  = '$select'  '=' proplist
+#             | '$filter'  '=' <$filter grammar, target-relative>
+#             | '$orderby' '=' <$orderby grammar>
+#             | '$top'     '=' uint
+#             | '$skip'    '=' uint
+#             | '$count'   '=' true|false
+#             | '$expand'  '=' item ( ',' item )*          (recursive; depth-capped)
+#
+# The forest is flattened into the module pool m_expandNodes; each item becomes a
+# node and nested items are referenced by their pool index (childRoots). $select
+# lives on the node; $filter/$orderby are parsed via the existing top-level
+# parsers into a throwaway query and lifted onto the node. Any other option (or
+# '*') => 501; a malformed option => 400.
 # ---------------------------------------------------------------------------
 PRIVATE FUNCTION parseExpand(
     s STRING, q ODataTypes.T_ODataQuery)
     RETURNS ODataTypes.T_ODataQuery
-    DEFINE items DYNAMIC ARRAY OF STRING
-    DEFINE i, lp, n INTEGER
-    DEFINE item, nm, inner STRING
-    DEFINE xi ODataTypes.T_ODataExpandItem
+    DEFINE roots DYNAMIC ARRAY OF INTEGER
+    DEFINE i INTEGER
 
-    CALL splitExpandItems(s) RETURNING items
-    FOR i = 1 TO items.getLength()
-        INITIALIZE xi.* TO NULL
-        CALL xi.selectList.clear()
-        LET item = items[i].trim()
-        IF item.getLength() == 0 THEN CONTINUE FOR END IF
-        IF item == "*" THEN
-            CALL setErr(q, "NotImplemented",
-                "$expand=* is not supported in v0") RETURNING q
-            RETURN q
-        END IF
-        LET lp = item.getIndexOf("(", 1)
-        IF lp > 0 THEN
-            IF item.getCharAt(item.getLength()) != ")" THEN
-                CALL setErr(q, "BadRequest",
-                    "Malformed $expand option") RETURNING q
-                RETURN q
-            END IF
-            LET nm = item.subString(1, lp - 1).trim()
-            LET inner = item.subString(lp + 1, item.getLength() - 1)
-            CALL parseExpandOptions(inner, xi)
-                RETURNING xi.*, q.ok, q.errorCode, q.errorMessage
-            IF NOT q.ok THEN RETURN q END IF
-        ELSE
-            LET nm = item
-        END IF
-        IF nm.getLength() == 0 THEN
-            CALL setErr(q, "BadRequest",
-                "Missing navigation property in $expand") RETURNING q
-            RETURN q
-        END IF
-        LET xi.path = nm
-        LET n = q.expand.getLength() + 1
-        LET q.expand[n].* = xi.*
+    CALL m_expandNodes.clear()
+    LET m_expandErr = NULL
+    LET m_expandCode = NULL
+
+    CALL parseExpandList(s) RETURNING roots
+    IF m_expandErr IS NOT NULL THEN
+        CALL setErr(q, m_expandCode, m_expandErr) RETURNING q
+        RETURN q
+    END IF
+
+    FOR i = 1 TO m_expandNodes.getLength()
+        LET q.expandNodes[i].* = m_expandNodes[i].*
+    END FOR
+    FOR i = 1 TO roots.getLength()
+        LET q.expandRoots[i] = roots[i]
     END FOR
     RETURN q
 END FUNCTION
 
-# Parse the nested options inside an $expand item's parentheses. v1 accepts only
-# $select; anything else (incl. a nested $expand) is 501.
-PRIVATE FUNCTION parseExpandOptions(
-    inner STRING, xi ODataTypes.T_ODataExpandItem)
-    RETURNS (ODataTypes.T_ODataExpandItem, BOOLEAN, STRING, STRING)
-    DEFINE st base.StringTokenizer
-    DEFINE opt, key, val STRING
-    DEFINE eq INTEGER
+# Parse a comma-separated list of $expand items into the pool; return their node
+# indices. On error sets m_expandErr/m_expandCode and returns what parsed so far.
+PRIVATE FUNCTION parseExpandList(s STRING) RETURNS DYNAMIC ARRAY OF INTEGER
+    DEFINE items DYNAMIC ARRAY OF STRING
+    DEFINE out DYNAMIC ARRAY OF INTEGER
+    DEFINE i, idx INTEGER
 
-    LET st = base.StringTokenizer.create(inner, ";")
-    WHILE st.hasMoreTokens()
-        LET opt = st.nextToken().trim()
-        IF opt.getLength() == 0 THEN CONTINUE WHILE END IF
+    CALL splitExpandItems(s) RETURNING items
+    FOR i = 1 TO items.getLength()
+        LET idx = parseExpandItem(items[i])
+        IF m_expandErr IS NOT NULL THEN RETURN out END IF
+        IF idx > 0 THEN
+            LET out[out.getLength() + 1] = idx
+        END IF
+    END FOR
+    RETURN out
+END FUNCTION
+
+# Parse one $expand item ("NAME" or "NAME(opts)"), append its node to the pool,
+# return the new node's index (0 when the item is empty/skipped or on error).
+PRIVATE FUNCTION parseExpandItem(rawItem STRING) RETURNS INTEGER
+    DEFINE node ODataTypes.T_ODataExpandNode
+    DEFINE item, nm, inner STRING
+    DEFINE lp, n INTEGER
+
+    LET item = rawItem.trim()
+    IF item.getLength() == 0 THEN RETURN 0 END IF
+    IF item == "*" THEN
+        LET m_expandCode = "NotImplemented"
+        LET m_expandErr = "$expand=* is not supported"
+        RETURN 0
+    END IF
+
+    LET lp = item.getIndexOf("(", 1)
+    IF lp > 0 THEN
+        IF item.getCharAt(item.getLength()) != ")" THEN
+            LET m_expandCode = "BadRequest"
+            LET m_expandErr = "Malformed $expand option (unbalanced parentheses)"
+            RETURN 0
+        END IF
+        LET nm = item.subString(1, lp - 1).trim()
+        LET inner = item.subString(lp + 1, item.getLength() - 1)
+        CALL parseExpandOptions(inner, node) RETURNING node
+        IF m_expandErr IS NOT NULL THEN RETURN 0 END IF
+    ELSE
+        LET nm = item
+    END IF
+
+    IF nm.getLength() == 0 THEN
+        LET m_expandCode = "BadRequest"
+        LET m_expandErr = "Missing navigation property in $expand"
+        RETURN 0
+    END IF
+    LET node.path = nm
+    LET n = m_expandNodes.getLength() + 1
+    LET m_expandNodes[n].* = node.*
+    RETURN n
+END FUNCTION
+
+# Parse the ';'-separated nested options of one $expand item into `node`. A
+# nested $filter/$orderby is parsed by the existing top-level parsers into a
+# throwaway query and lifted onto the node; a nested $expand recurses into the
+# pool. Sets m_expandErr/m_expandCode on failure.
+PRIVATE FUNCTION parseExpandOptions(
+    inner STRING, node ODataTypes.T_ODataExpandNode)
+    RETURNS ODataTypes.T_ODataExpandNode
+    DEFINE opts DYNAMIC ARRAY OF STRING
+    DEFINE childRoots DYNAMIC ARRAY OF INTEGER
+    DEFINE tmp ODataTypes.T_ODataQuery
+    DEFINE opt, key, val STRING
+    DEFINE i, eq, j INTEGER
+
+    CALL splitNestedOptions(inner) RETURNING opts
+    FOR i = 1 TO opts.getLength()
+        LET opt = opts[i].trim()
+        IF opt.getLength() == 0 THEN CONTINUE FOR END IF
         LET eq = opt.getIndexOf("=", 1)
         IF eq <= 0 THEN
-            RETURN xi.*, FALSE, "NotImplemented",
-                SFMT("Unsupported $expand option '%1' in v0", opt)
+            LET m_expandCode = "BadRequest"
+            LET m_expandErr = SFMT("Malformed $expand option '%1'", opt)
+            RETURN node
         END IF
         LET key = opt.subString(1, eq - 1).trim().toLowerCase()
         LET val = opt.subString(eq + 1, opt.getLength())
-        IF key == "$select" THEN
-            CALL splitList(val) RETURNING xi.selectList
-        ELSE
-            RETURN xi.*, FALSE, "NotImplemented",
-                SFMT("The $expand option '%1' is not supported in v0", key)
-        END IF
-    END WHILE
-    RETURN xi.*, TRUE, NULL, NULL
+        CASE key
+            WHEN "$select"
+                CALL splitList(val) RETURNING node.selectList
+            WHEN "$orderby"
+                INITIALIZE tmp.* TO NULL
+                LET tmp.ok = TRUE
+                CALL parseOrderBy(val, tmp) RETURNING tmp
+                IF NOT tmp.ok THEN
+                    LET m_expandCode = tmp.errorCode
+                    LET m_expandErr = tmp.errorMessage
+                    RETURN node
+                END IF
+                FOR j = 1 TO tmp.orderby.getLength()
+                    LET node.orderby[j].* = tmp.orderby[j].*
+                END FOR
+            WHEN "$filter"
+                INITIALIZE tmp.* TO NULL
+                LET tmp.ok = TRUE
+                CALL parseFilter(val, tmp) RETURNING tmp
+                IF NOT tmp.ok THEN
+                    LET m_expandCode = tmp.errorCode
+                    LET m_expandErr = tmp.errorMessage
+                    RETURN node
+                END IF
+                FOR j = 1 TO tmp.filterNodes.getLength()
+                    LET node.filterNodes[j].* = tmp.filterNodes[j].*
+                END FOR
+                LET node.filterRoot = tmp.filterRoot
+            WHEN "$top"
+                IF isUnsignedInt(val.trim()) THEN
+                    LET node.top = val.trim()
+                    LET node.hasTop = TRUE
+                ELSE
+                    LET m_expandCode = "BadRequest"
+                    LET m_expandErr = "Invalid $top value in $expand"
+                    RETURN node
+                END IF
+            WHEN "$skip"
+                IF isUnsignedInt(val.trim()) THEN
+                    LET node.skip = val.trim()
+                ELSE
+                    LET m_expandCode = "BadRequest"
+                    LET m_expandErr = "Invalid $skip value in $expand"
+                    RETURN node
+                END IF
+            WHEN "$count"
+                CASE val.trim().toLowerCase()
+                    WHEN "true"  LET node.wantCount = TRUE
+                    WHEN "false" LET node.wantCount = FALSE
+                    OTHERWISE
+                        LET m_expandCode = "BadRequest"
+                        LET m_expandErr = "Invalid $count value in $expand"
+                        RETURN node
+                END CASE
+            WHEN "$expand"
+                CALL parseExpandList(val) RETURNING childRoots
+                IF m_expandErr IS NOT NULL THEN RETURN node END IF
+                FOR j = 1 TO childRoots.getLength()
+                    LET node.childRoots[j] = childRoots[j]
+                END FOR
+            OTHERWISE
+                LET m_expandCode = "NotImplemented"
+                LET m_expandErr =
+                    SFMT("The $expand option '%1' is not supported", key)
+                RETURN node
+        END CASE
+    END FOR
+    RETURN node
 END FUNCTION
 
 # Split a comma-separated $expand list, keeping commas inside parentheses (a
-# nested $select list) attached to their item.
+# nested option list) attached to their item.
 PRIVATE FUNCTION splitExpandItems(s STRING) RETURNS DYNAMIC ARRAY OF STRING
+    RETURN splitTopLevel(s, ",")
+END FUNCTION
+
+# Split an $expand item's nested-option string on ';' at paren-depth 0, so a
+# nested $expand (which carries its own '(' ')' ';') stays attached to its option.
+PRIVATE FUNCTION splitNestedOptions(s STRING) RETURNS DYNAMIC ARRAY OF STRING
+    RETURN splitTopLevel(s, ";")
+END FUNCTION
+
+# Split `s` on `sep` only where parenthesis depth is 0. Single-character `sep`.
+PRIVATE FUNCTION splitTopLevel(s STRING, sep STRING) RETURNS DYNAMIC ARRAY OF STRING
     DEFINE out DYNAMIC ARRAY OF STRING
     DEFINE buf base.StringBuffer
     DEFINE i, depth INTEGER
@@ -239,7 +373,7 @@ PRIVATE FUNCTION splitExpandItems(s STRING) RETURNS DYNAMIC ARRAY OF STRING
             WHEN c == ")"
                 LET depth = depth - 1
                 CALL buf.append(c)
-            WHEN c == "," AND depth == 0
+            WHEN c == sep AND depth == 0
                 LET out[out.getLength() + 1] = buf.toString()
                 CALL buf.clear()
             OTHERWISE
