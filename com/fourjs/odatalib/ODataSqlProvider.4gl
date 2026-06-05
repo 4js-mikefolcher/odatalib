@@ -43,6 +43,13 @@ END RECORD
 PRIVATE DEFINE m_whereBuf base.StringBuffer
 PRIVATE DEFINE m_whereParams DYNAMIC ARRAY OF t_bindParam
 PRIVATE DEFINE m_whereErr STRING
+# When a lambda (any/all) emits a correlated subquery, the columns inside that
+# subquery must be qualified to disambiguate the subquery's own table from the
+# correlated outer table. m_colPrefix is prepended to every column a predicate
+# emits ("" outside any subquery, "<alias>." inside). m_lambdaAlias names each
+# subquery's table uniquely; it is reset per WHERE build (nesting is disallowed).
+PRIVATE DEFINE m_colPrefix STRING
+PRIVATE DEFINE m_lambdaAlias INTEGER
 
 #+ Fetch a page of rows for the entity according to the parsed query.
 PUBLIC FUNCTION fetch(
@@ -278,6 +285,8 @@ PRIVATE FUNCTION buildWhereTree(
     LET m_whereBuf = base.StringBuffer.create()
     CALL m_whereParams.clear()
     LET m_whereErr = NULL
+    LET m_colPrefix = ""
+    LET m_lambdaAlias = 0
 
     CALL m_whereBuf.append(" WHERE ")
     CALL buildNode(entity, query, query.filterRoot)
@@ -300,6 +309,8 @@ PRIVATE FUNCTION buildNode(
     CASE node.kind
         WHEN "pred"
             CALL appendPredicate(entity, node.pred.*)
+        WHEN "lambda"
+            CALL appendLambda(entity, query, node.*)
         WHEN "not"
             CALL m_whereBuf.append("(NOT ")
             CALL buildNode(entity, query, node.left)
@@ -322,6 +333,86 @@ PRIVATE FUNCTION buildNode(
     END CASE
 END FUNCTION
 
+# Emit a lambda (any/all) as a correlated subquery against the navigation target.
+#   any(P) -> EXISTS (SELECT 1 FROM tgt a WHERE a.toCol = outer.fromCol AND (P))
+#   any()  -> EXISTS (SELECT 1 FROM tgt a WHERE a.toCol = outer.fromCol)
+#   all(P) -> NOT EXISTS (SELECT 1 FROM tgt a WHERE join AND NOT (P))
+# The inner predicate P is built against the TARGET entity with m_colPrefix set to
+# the subquery alias, so its columns are unambiguously qualified. Bound parameters
+# are appended inline in placeholder order, keeping them aligned with the SQL.
+PRIVATE FUNCTION appendLambda(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery,
+    node ODataTypes.T_ODataFilterNode)
+    DEFINE nav ODataTypes.T_ODataNavigation
+    DEFINE target ODataTypes.T_ODataEntity
+    DEFINE found BOOLEAN
+    DEFINE navName, quant, fromCol, toCol, alias, savedPrefix STRING
+
+    IF m_whereErr IS NOT NULL THEN RETURN END IF
+    LET navName = node.pred.property
+    LET quant = node.pred.operator
+
+    CALL ODataConfig.findNavigation(entity, navName) RETURNING nav.*, found
+    IF NOT found THEN
+        LET m_whereErr =
+            SFMT("Unknown navigation property '%1' in $filter", navName)
+        RETURN
+    END IF
+    IF nav.on.getLength() != 1 THEN
+        LET m_whereErr =
+            SFMT("Composite-key lambda on '%1' is not supported", navName)
+        RETURN
+    END IF
+    CALL ODataConfig.findEntity(nav.target) RETURNING target.*, found
+    IF NOT found THEN
+        LET m_whereErr =
+            SFMT("Navigation target '%1' is not a declared entity", nav.target)
+        RETURN
+    END IF
+    IF target.provider != "sql" THEN
+        LET m_whereErr =
+            SFMT("Lambda over non-SQL target '%1' is not supported", nav.target)
+        RETURN
+    END IF
+    LET fromCol = ODataConfig.columnFor(entity, nav.on[1].fromProp)
+    LET toCol = ODataConfig.columnFor(target, nav.on[1].toProp)
+    IF fromCol IS NULL OR toCol IS NULL THEN
+        LET m_whereErr =
+            SFMT("Lambda join columns for '%1' are not declared", navName)
+        RETURN
+    END IF
+
+    LET m_lambdaAlias = m_lambdaAlias + 1
+    LET alias = SFMT("_l%1", m_lambdaAlias)
+    LET savedPrefix = m_colPrefix
+
+    CASE quant
+        WHEN "any"
+            CALL m_whereBuf.append(SFMT(
+                "EXISTS (SELECT 1 FROM %1 %2 WHERE %2.%3 = %4.%5",
+                target.source, alias, toCol, entity.source, fromCol))
+            IF node.left > 0 THEN
+                CALL m_whereBuf.append(" AND (")
+                LET m_colPrefix = SFMT("%1.", alias)
+                CALL buildNode(target, query, node.left)
+                LET m_colPrefix = savedPrefix
+                CALL m_whereBuf.append(")")
+            END IF
+            CALL m_whereBuf.append(")")
+        WHEN "all"
+            CALL m_whereBuf.append(SFMT(
+                "NOT EXISTS (SELECT 1 FROM %1 %2 WHERE %2.%3 = %4.%5 AND NOT (",
+                target.source, alias, toCol, entity.source, fromCol))
+            LET m_colPrefix = SFMT("%1.", alias)
+            CALL buildNode(target, query, node.left)
+            LET m_colPrefix = savedPrefix
+            CALL m_whereBuf.append("))")
+        OTHERWISE
+            LET m_whereErr =
+                SFMT("Internal: unknown lambda quantifier '%1'", quant)
+    END CASE
+END FUNCTION
+
 # Flat builder: predicates joined left-to-right by their conjunction field. Used
 # by the key-lookup path (a single eq predicate, no tree).
 PRIVATE FUNCTION buildWhereFlat(
@@ -333,6 +424,8 @@ PRIVATE FUNCTION buildWhereFlat(
     LET m_whereBuf = base.StringBuffer.create()
     CALL m_whereParams.clear()
     LET m_whereErr = NULL
+    LET m_colPrefix = ""
+    LET m_lambdaAlias = 0
 
     IF query.filters.getLength() == 0 THEN
         RETURN "", m_whereParams, TRUE, NULL
@@ -375,6 +468,8 @@ PRIVATE FUNCTION appendPredicate(
     IF col IS NULL OR col.getLength() == 0 THEN
         LET col = prop.name
     END IF
+    # Qualify with the active subquery alias (empty outside a lambda subquery).
+    LET col = SFMT("%1%2", m_colPrefix, col)
 
     IF flt.isNull THEN
         # The OData null literal maps to SQL IS [NOT] NULL with no bound

@@ -32,6 +32,9 @@ PRIVATE DEFINE m_tokens DYNAMIC ARRAY OF STRING
 PRIVATE DEFINE m_tpos INTEGER                                  # parser cursor
 PRIVATE DEFINE m_nodes DYNAMIC ARRAY OF ODataTypes.T_ODataFilterNode
 PRIVATE DEFINE m_perr STRING                                   # parse error (NULL = ok)
+PRIVATE DEFINE m_pcode STRING                                  # error code for m_perr (default BadRequest)
+PRIVATE DEFINE m_lambdaVar STRING                              # active lambda variable (strip "var/" in P)
+PRIVATE DEFINE m_inLambda BOOLEAN                              # inside a lambda body (reject nesting)
 
 # Scratch state for the $expand forest parser. Nodes (all nesting levels) are
 # appended to m_expandNodes and referenced by 1-based index; parseExpand commits
@@ -407,6 +410,9 @@ PRIVATE FUNCTION parseFilter(
     CALL m_nodes.clear()
     LET m_tpos = 1
     LET m_perr = NULL
+    LET m_pcode = "BadRequest"
+    LET m_lambdaVar = NULL
+    LET m_inLambda = FALSE
 
     IF m_tokens.getLength() == 0 THEN
         RETURN q                               # empty / whitespace $filter: no-op
@@ -414,7 +420,7 @@ PRIVATE FUNCTION parseFilter(
 
     LET root = parseOr()
     IF m_perr IS NOT NULL THEN
-        CALL setErr(q, "BadRequest", m_perr) RETURNING q
+        CALL setErr(q, m_pcode, m_perr) RETURNING q
         RETURN q
     END IF
     IF m_tpos <= m_tokens.getLength() THEN
@@ -518,6 +524,12 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
     DEFINE pp INTEGER
 
     INITIALIZE f.* TO NULL
+
+    # lambda form: nav/any(...) | nav/all(...)
+    IF isLambdaHead(m_tokens[m_tpos]) THEN
+        RETURN parseLambda()
+    END IF
+
     LET fn = m_tokens[m_tpos].toLowerCase()
 
     # function form: fn ( property , 'value' )
@@ -532,7 +544,7 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
             RETURN 0
         END IF
         LET f.operator = fn
-        LET f.property = m_tokens[m_tpos + 2]
+        LET f.property = normProperty(m_tokens[m_tpos + 2])
         LET f.value = stripQuotes(m_tokens[m_tpos + 4])
         LET m_tpos = m_tpos + 6
         RETURN addPred(f)
@@ -551,7 +563,7 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
             LET m_perr = "Expected '(' after 'in' in $filter"
             RETURN 0
         END IF
-        LET f.property = m_tokens[m_tpos]
+        LET f.property = normProperty(m_tokens[m_tpos])
         LET f.operator = "in"
         LET pp = m_tpos + 3
         WHILE pp <= m_tokens.getLength()
@@ -582,7 +594,7 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
             LET m_perr = SFMT("Unsupported comparison operator '%1'", op)
             RETURN 0
     END CASE
-    LET f.property = m_tokens[m_tpos]
+    LET f.property = normProperty(m_tokens[m_tpos])
     LET f.operator = op
     # The bare keyword `null` (unquoted) is the OData null literal; the quoted
     # string 'null' is a normal text value. Both strip to "null", so flag the
@@ -614,6 +626,140 @@ PRIVATE FUNCTION addPred(f ODataTypes.T_ODataFilter) RETURNS INTEGER
     LET m_nodes[n].kind = "pred"
     LET m_nodes[n].pred.* = f.*
     RETURN n
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# Lambda operators (any / all) over a collection navigation property.
+#   nav/any(v: P) | nav/all(v: P) | nav/any()
+# Stored as a "lambda" node overloading T_ODataFilterNode: pred.property = nav,
+# pred.operator = quantifier, left = inner-predicate root (0 for empty any()).
+# ---------------------------------------------------------------------------
+
+#+ Index of the last '/' in s, or 0 if none. (STRING.getIndexOf finds the first
+#+ occurrence only.) The lambda operator is always the final path segment, so the
+#+ split must be on the last '/' — otherwise a var-qualified nested head like
+#+ "o/OrderDetails/any" is misread (tail "OrderDetails/any") and falls through to
+#+ a comparison instead of being recognised (and rejected) as a nested lambda.
+PRIVATE FUNCTION lastSlash(s STRING) RETURNS INTEGER
+    DEFINE i, last INTEGER
+    IF s IS NULL THEN RETURN 0 END IF
+    FOR i = 1 TO s.getLength()
+        IF s.getCharAt(i) == "/" THEN LET last = i END IF
+    END FOR
+    RETURN last
+END FUNCTION
+
+#+ TRUE when the token at the cursor is "<nav>/any" or "<nav>/all" followed by
+#+ '(' — i.e. a lambda operator head (as opposed to a scalar comparison).
+PRIVATE FUNCTION isLambdaHead(t STRING) RETURNS BOOLEAN
+    DEFINE sl INTEGER
+    DEFINE tail STRING
+    IF t IS NULL THEN RETURN FALSE END IF
+    LET sl = lastSlash(t)
+    IF sl <= 0 THEN RETURN FALSE END IF
+    LET tail = t.subString(sl + 1, t.getLength()).toLowerCase()
+    IF tail != "any" AND tail != "all" THEN RETURN FALSE END IF
+    IF m_tpos + 1 > m_tokens.getLength() THEN RETURN FALSE END IF
+    RETURN m_tokens[m_tpos + 1] == "("
+END FUNCTION
+
+#+ Parse a lambda expression at the cursor and return its node index.
+PRIVATE FUNCTION parseLambda() RETURNS INTEGER
+    DEFINE head, navName, quant, var STRING
+    DEFINE sl, innerRoot INTEGER
+
+    IF m_inLambda THEN
+        LET m_pcode = "NotImplemented"
+        LET m_perr = "Nested lambda expressions are not supported"
+        RETURN 0
+    END IF
+    LET head = m_tokens[m_tpos]
+    LET sl = lastSlash(head)
+    LET navName = head.subString(1, sl - 1)
+    LET quant = head.subString(sl + 1, head.getLength()).toLowerCase()
+    LET m_tpos = m_tpos + 1                        # consume nav/quant head
+    IF m_tpos > m_tokens.getLength() OR m_tokens[m_tpos] != "(" THEN
+        LET m_perr = "Expected '(' after lambda operator"
+        RETURN 0
+    END IF
+    LET m_tpos = m_tpos + 1                        # consume '('
+
+    # Empty body: any() is a pure existence test; all() requires a predicate.
+    IF m_tpos <= m_tokens.getLength() AND m_tokens[m_tpos] == ")" THEN
+        IF quant == "all" THEN
+            LET m_perr = "The 'all' lambda requires a predicate"
+            RETURN 0
+        END IF
+        LET m_tpos = m_tpos + 1                    # consume ')'
+        RETURN addLambda(navName, quant, 0)
+    END IF
+
+    # var ':' predicate
+    IF m_tpos > m_tokens.getLength() THEN
+        LET m_perr = "Expected lambda variable"
+        RETURN 0
+    END IF
+    LET var = m_tokens[m_tpos]
+    LET m_tpos = m_tpos + 1                        # consume variable
+    IF m_tpos > m_tokens.getLength() OR m_tokens[m_tpos] != ":" THEN
+        LET m_perr = "Expected ':' in lambda expression"
+        RETURN 0
+    END IF
+    LET m_tpos = m_tpos + 1                        # consume ':'
+
+    LET m_lambdaVar = var
+    LET m_inLambda = TRUE
+    LET innerRoot = parseOr()                      # P, into the shared node pool
+    LET m_inLambda = FALSE
+    LET m_lambdaVar = NULL
+    IF m_perr IS NOT NULL THEN RETURN 0 END IF
+    IF m_tpos > m_tokens.getLength() OR m_tokens[m_tpos] != ")" THEN
+        LET m_perr = "Expected ')' to close lambda expression"
+        RETURN 0
+    END IF
+    LET m_tpos = m_tpos + 1                        # consume ')'
+    RETURN addLambda(navName, quant, innerRoot)
+END FUNCTION
+
+#+ Append a lambda node and return its 1-based index.
+PRIVATE FUNCTION addLambda(navName STRING, quant STRING, innerRoot INTEGER)
+    RETURNS INTEGER
+    DEFINE n INTEGER
+    LET n = m_nodes.getLength() + 1
+    LET m_nodes[n].kind = "lambda"
+    LET m_nodes[n].left = innerRoot
+    LET m_nodes[n].right = 0
+    LET m_nodes[n].pred.property = navName
+    LET m_nodes[n].pred.operator = quant
+    RETURN n
+END FUNCTION
+
+#+ Normalise a property token. Inside a lambda body the active "<var>/" prefix is
+#+ stripped so the stored name is the bare target property; a remaining '/' (a
+#+ deeper nav path) is unsupported. Outside a lambda, any '/' is a single-valued
+#+ navigation-path comparison, also unsupported in this version. Both set a
+#+ NotImplemented parse error.
+PRIVATE FUNCTION normProperty(prop STRING) RETURNS STRING
+    DEFINE pfx STRING
+    IF prop IS NULL THEN RETURN prop END IF
+    IF m_inLambda AND m_lambdaVar IS NOT NULL THEN
+        LET pfx = SFMT("%1/", m_lambdaVar)
+        IF prop.getLength() > pfx.getLength()
+            AND prop.subString(1, pfx.getLength()) == pfx THEN
+            LET prop = prop.subString(pfx.getLength() + 1, prop.getLength())
+        END IF
+    END IF
+    IF prop.getIndexOf("/", 1) > 0 THEN
+        LET m_pcode = "NotImplemented"
+        IF m_inLambda THEN
+            LET m_perr =
+                SFMT("Navigation path '%1' inside a lambda is not supported", prop)
+        ELSE
+            LET m_perr =
+                SFMT("Navigation-path filter '%1' is not supported", prop)
+        END IF
+    END IF
+    RETURN prop
 END FUNCTION
 
 # ---------------------------------------------------------------------------
@@ -650,7 +796,11 @@ PRIVATE FUNCTION tokenize(s STRING)
                     LET inStr = TRUE
                 WHEN c == " " OR c == "\t"
                     CALL flushToken(cur)
-                WHEN c == "(" OR c == ")" OR c == ","
+                WHEN c == "(" OR c == ")" OR c == "," OR c == ":"
+                    # ':' separates a lambda variable from its predicate, e.g.
+                    # Orders/any(o: …). '/' is deliberately NOT a delimiter — a
+                    # nav path token (Orders/any, o/Freight) stays whole and the
+                    # parser splits it.
                     CALL flushToken(cur)
                     LET m_tokens[m_tokens.getLength() + 1] = c
                 OTHERWISE

@@ -59,7 +59,9 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 - `$filter` — `eq ne gt lt ge le`, `in (…)`, and `contains` / `startswith` /
   `endswith`, combined with `and` / `or` / `not` and parenthesised grouping, with
   correct `not` > `and` > `or` precedence; `eq null` / `ne null` map to SQL
-  `IS NULL` / `IS NOT NULL`
+  `IS NULL` / `IS NOT NULL`. Lambda operators on collection navigation properties:
+  `nav/any(v: P)`, `nav/all(v: P)`, and `nav/any()` (existence) — compiled to a
+  correlated `EXISTS` / `NOT EXISTS` subquery (SQL providers; single-pair joins)
 - `$select` — property projection
 - `$top`, `$skip` — pagination
 - `$orderby` — multi-term, `asc` / `desc`
@@ -379,8 +381,8 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- `$batch`, `$apply`, lambda operators (`any`/`all`), delta/change-tracking,
-  actions/functions; `$expand=*` and `$levels`
+- `$batch`, `$apply`, delta/change-tracking, actions/functions; `$expand=*`,
+  `$levels`, nested lambda, and single-valued navigation-path comparisons
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
@@ -436,6 +438,17 @@ including Power BI; the body is well-formed CSDL.
   (default 3; deeper → `501`). The `$expand` forest is parsed into a flat node
   pool (the same index-pool technique as the `$filter` tree, since BDL has no
   recursive types). Verified on live GAS against PostgreSQL.
+- *Lambda operators (`any` / `all`).* `$filter` can test a collection navigation
+  property: `Customers?$filter=Orders/any(o: o/Freight gt 100)`,
+  `Orders?$filter=OrderDetails/all(d: d/Quantity ge 10)`,
+  `Categories?$filter=Products/any()`. Each compiles to a correlated subquery —
+  `any` → `EXISTS (… AND P)`, `all` → `NOT EXISTS (… AND NOT P)` (so `all` is
+  vacuously true for a parent with no related rows). The lambda predicate `P`
+  reuses the full `$filter` grammar over the target entity and composes with the
+  rest of the filter via `and`/`or`/`not`. A lambda overloads a `"lambda"` node in
+  the existing filter tree (no new type). SQL providers, single-pair joins;
+  function-provider host/target, nested lambda, and composite joins return `501`.
+  Verified on live GAS against PostgreSQL.
 - *Service loop lifecycle.* `ODataService.run()` now only terminates the DVM on
   `-2` / `-4` / `-10` (per the documented engine contract); transient
   per-connection codes such as `-3` no longer end the process, so the GAS pool

@@ -108,6 +108,44 @@ MAIN
     CALL showExpand(ent, "OrderID", "OrderID eq 10248", NULL,
         "OrderDetails($expand=Product($expand=Category($expand=Products)))")
 
+    # --- lambda operators (any / all) -----------------------------------------
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    DISPLAY "\n== Customers?$filter=Orders/any(o: o/Freight gt 100)&$count=true  (expect 55) =="
+    CALL showCollection(ent, "CustomerID", "Orders/any(o: o/Freight gt 100)",
+        "3", NULL, "true", NULL)
+
+    DISPLAY "\n== Customers?$filter=Country eq 'Germany' and Orders/any(o: o/Freight gt 50)&$count=true  (expect 11) =="
+    CALL showCollection(ent, "CustomerID",
+        "Country eq 'Germany' and Orders/any(o: o/Freight gt 50)",
+        "3", NULL, "true", NULL)
+
+    DISPLAY "\n== Customers?$filter=Orders/any(o: o/ShipCountry in ('France','Spain'))&$count=true  (expect 14) =="
+    CALL showCollection(ent, "CustomerID",
+        "Orders/any(o: o/ShipCountry in ('France','Spain'))", "3", NULL, "true", NULL)
+
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    DISPLAY "\n== Orders?$filter=OrderDetails/all(d: d/Quantity ge 10)&$count=true  (expect 507) =="
+    CALL showCollection(ent, "OrderID", "OrderDetails/all(d: d/Quantity ge 10)",
+        "3", NULL, "true", NULL)
+
+    CALL ODataConfig.findEntity("Categories") RETURNING ent.*, found
+    DISPLAY "\n== Categories?$filter=Products/any()&$count=true  (expect 9) =="
+    CALL showCollection(ent, "CategoryID", "Products/any()", "3", NULL, "true", NULL)
+
+    # --- lambda error paths ---------------------------------------------------
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    DISPLAY "\n== Orders?$filter=OrderDetails/all()  (expect 400) =="
+    CALL showCollection(ent, "OrderID", "OrderDetails/all()", NULL, NULL, NULL, NULL)
+
+    DISPLAY "\n== Customers?$filter=Orders/any(o: o/Bogus eq 1)  (expect 400) =="
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    CALL showCollection(ent, "CustomerID", "Orders/any(o: o/Bogus eq 1)",
+        NULL, NULL, NULL, NULL)
+
+    DISPLAY "\n== CountrySummary?$filter=Customers/any()  (function host, expect 501) =="
+    CALL ODataConfig.findEntity("CountrySummary") RETURNING ent.*, found
+    CALL showCollection(ent, NULL, "Customers/any()", NULL, NULL, NULL, NULL)
+
     DISCONNECT CURRENT
 END MAIN
 

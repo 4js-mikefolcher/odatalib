@@ -69,6 +69,13 @@ PUBLIC FUNCTION fetch(
             SFMT("No function provider registered for '%1'", entity.name))
     END IF
 
+    # A lambda (any/all) compiles to a correlated SQL subquery, which a callback
+    # result set cannot express; reject rather than silently ignore the term.
+    IF hasLambda(query) THEN
+        RETURN errorResult("NotImplemented",
+            "Lambda operators (any/all) are not supported on function-backed entities")
+    END IF
+
     LET fn = m_registry[entity.name]
     CALL fn(entity.name, query) RETURNING custRes.*
     IF NOT custRes.ok THEN
@@ -154,6 +161,21 @@ PUBLIC FUNCTION fetchByKeys(
                 entity.name, ODataConfig.keyDescription(keyParts))
     END IF
     RETURN res
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# Internal
+# ---------------------------------------------------------------------------
+
+#+ TRUE when the parsed $filter tree contains a lambda (any/all) node.
+PRIVATE FUNCTION hasLambda(query ODataTypes.T_ODataQuery) RETURNS BOOLEAN
+    DEFINE i INTEGER
+    FOR i = 1 TO query.filterNodes.getLength()
+        IF query.filterNodes[i].kind == "lambda" THEN
+            RETURN TRUE
+        END IF
+    END FOR
+    RETURN FALSE
 END FUNCTION
 
 # ---------------------------------------------------------------------------
