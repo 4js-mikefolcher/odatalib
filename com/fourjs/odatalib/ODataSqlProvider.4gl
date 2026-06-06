@@ -220,6 +220,349 @@ PUBLIC FUNCTION fetchByKeys(
 END FUNCTION
 
 # ---------------------------------------------------------------------------
+# $apply (aggregation)
+# ---------------------------------------------------------------------------
+
+#+ Execute an $apply aggregation query. Builds SELECT <dims/agg exprs> FROM source
+#+ [WHERE pre-agg filter] [GROUP BY dims] [ORDER BY], pages the grouped rows with a
+#+ scroll cursor, and materialises dynamic-column rows (dimension property names +
+#+ aggregate aliases). $count=true returns the number of groups.
+PUBLIC FUNCTION applyFetch(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS ODataTypes.T_ODataResult
+    DEFINE res ODataTypes.T_ODataResult
+    DEFINE selectClause, whereClause, groupClause, orderClause, sql STRING
+    DEFINE outKeys DYNAMIC ARRAY OF STRING
+    DEFINE outEdm DYNAMIC ARRAY OF STRING
+    DEFINE params DYNAMIC ARRAY OF t_bindParam
+    DEFINE pageSize, effLimit, pos, i, fetched INTEGER
+    DEFINE sqlObj base.SqlHandle
+    DEFINE rowObj util.JSONObject
+
+    LET res.ok = TRUE
+    LET res.rows = util.JSONArray.create()
+    LET res.count = 0
+    LET res.hasMore = FALSE
+
+    CALL buildApplySelect(entity, query)
+        RETURNING selectClause, outKeys, outEdm, res.ok, res.errorMessage
+    IF NOT res.ok THEN
+        LET res.errorCode = "BadRequest"
+        RETURN res
+    END IF
+
+    CALL buildWhere(entity, query)
+        RETURNING whereClause, params, res.ok, res.errorMessage
+    IF NOT res.ok THEN
+        LET res.errorCode = "BadRequest"
+        RETURN res
+    END IF
+
+    CALL buildApplyGroupBy(entity, query) RETURNING groupClause, res.ok, res.errorMessage
+    IF NOT res.ok THEN
+        LET res.errorCode = "BadRequest"
+        RETURN res
+    END IF
+
+    CALL buildApplyOrderBy(entity, query) RETURNING orderClause, res.ok, res.errorMessage
+    IF NOT res.ok THEN
+        LET res.errorCode = "BadRequest"
+        RETURN res
+    END IF
+
+    LET sql = SFMT("SELECT %1 FROM %2%3%4%5",
+        selectClause, entity.source, whereClause, groupClause, orderClause)
+
+    LET pageSize = entity.pageSize
+    IF pageSize <= 0 THEN LET pageSize = DEFAULT_PAGE_SIZE END IF
+    IF pageSize > MAX_PAGE_SIZE THEN LET pageSize = MAX_PAGE_SIZE END IF
+    LET effLimit = pageSize
+    IF query.hasTop AND query.top < pageSize THEN
+        LET effLimit = query.top
+    END IF
+
+    TRY
+        LET sqlObj = base.SqlHandle.create()
+        CALL sqlObj.prepare(sql)
+        FOR i = 1 TO params.getLength()
+            CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
+        END FOR
+        CALL sqlObj.openScrollCursor()
+
+        LET pos = query.skip + 1
+        LET fetched = 0
+        WHILE fetched < effLimit
+            CALL sqlObj.fetchAbsolute(pos)
+            IF sqlca.sqlcode == NOTFOUND THEN
+                EXIT WHILE
+            END IF
+            LET rowObj = util.JSONObject.create()
+            FOR i = 1 TO outKeys.getLength()
+                IF outEdm[i] == "Edm.Single" THEN
+                    CALL rowObj.put(outKeys[i], singleValue(sqlObj.getResultValue(i)))
+                ELSE
+                    CALL rowObj.put(outKeys[i], sqlObj.getResultValue(i))
+                END IF
+            END FOR
+            CALL res.rows.put(res.rows.getLength() + 1, rowObj)
+            LET fetched = fetched + 1
+            LET pos = pos + 1
+        END WHILE
+
+        IF fetched == effLimit AND effLimit == pageSize THEN
+            CALL sqlObj.fetchAbsolute(pos)
+            IF sqlca.sqlcode != NOTFOUND THEN
+                LET res.hasMore = TRUE
+            END IF
+        END IF
+        CALL sqlObj.close()
+    CATCH
+        LET res.ok = FALSE
+        LET res.errorCode = "InternalError"
+        LET res.errorMessage =
+            SFMT("Aggregation query failed (SQLCODE %1)", sqlca.sqlcode)
+        RETURN res
+    END TRY
+
+    IF query.wantCount THEN
+        CALL applyCount(entity, query)
+            RETURNING res.count, res.ok, res.errorMessage
+        IF NOT res.ok THEN
+            LET res.errorCode = "InternalError"
+            RETURN res
+        END IF
+    END IF
+    RETURN res
+END FUNCTION
+
+# Build the $apply select list. Returns: select SQL, the output JSON key per
+# column, the Edm type per column ("" for aggregates), ok, error. Columns are
+# emitted WITHOUT a SQL "AS <alias>": results are read by position and the JSON
+# keys come from the returned outKeys, and the dbmpgs scroll-cursor emulation
+# rejects quoted column aliases at OPEN (syntax error 42601). $orderby maps an
+# aggregate alias to its ordinal position instead (see buildApplyOrderBy).
+PRIVATE FUNCTION buildApplySelect(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (STRING, DYNAMIC ARRAY OF STRING, DYNAMIC ARRAY OF STRING, BOOLEAN, STRING)
+    DEFINE buf base.StringBuffer
+    DEFINE outKeys, outEdm DYNAMIC ARRAY OF STRING
+    DEFINE i, n INTEGER
+    DEFINE col, expr STRING
+    DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE agg ODataTypes.T_ODataAggregate
+    DEFINE found BOOLEAN
+
+    LET buf = base.StringBuffer.create()
+    LET n = 0
+
+    FOR i = 1 TO query.apply.dims.getLength()
+        LET col = ODataConfig.columnFor(entity, query.apply.dims[i])
+        IF col IS NULL THEN
+            RETURN NULL, outKeys, outEdm, FALSE,
+                SFMT("Unknown property '%1' in $apply groupby", query.apply.dims[i])
+        END IF
+        LET n = n + 1
+        IF n > 1 THEN CALL buf.append(", ") END IF
+        CALL buf.append(col)
+        LET outKeys[n] = query.apply.dims[i]
+        CALL ODataConfig.findProperty(entity, query.apply.dims[i]) RETURNING prop.*, found
+        LET outEdm[n] = prop.edmType
+    END FOR
+
+    FOR i = 1 TO query.apply.aggs.getLength()
+        LET agg.* = query.apply.aggs[i].*
+        IF agg.method == "count" THEN
+            LET expr = "COUNT(*)"
+        ELSE
+            LET col = ODataConfig.columnFor(entity, agg.source)
+            IF col IS NULL THEN
+                RETURN NULL, outKeys, outEdm, FALSE,
+                    SFMT("Unknown measure property '%1' in $apply aggregate", agg.source)
+            END IF
+            CALL ODataConfig.findProperty(entity, agg.source) RETURNING prop.*, found
+            IF (agg.method == "sum" OR agg.method == "average")
+                AND NOT isNumericEdm(prop.edmType) THEN
+                RETURN NULL, outKeys, outEdm, FALSE,
+                    SFMT("Aggregate '%1' requires a numeric measure, but '%2' is %3",
+                        agg.method, agg.source, prop.edmType)
+            END IF
+            CASE agg.method
+                WHEN "sum" LET expr = SFMT("SUM(%1)", col)
+                WHEN "average" LET expr = SFMT("AVG(%1)", col)
+                WHEN "min" LET expr = SFMT("MIN(%1)", col)
+                WHEN "max" LET expr = SFMT("MAX(%1)", col)
+                WHEN "countdistinct" LET expr = SFMT("COUNT(DISTINCT %1)", col)
+                OTHERWISE
+                    RETURN NULL, outKeys, outEdm, FALSE,
+                        SFMT("Unsupported aggregate method '%1'", agg.method)
+            END CASE
+        END IF
+        LET n = n + 1
+        IF n > 1 THEN CALL buf.append(", ") END IF
+        CALL buf.append(expr)
+        LET outKeys[n] = agg.alias
+        # min/max/sum/average over an Edm.Single measure carry the float4->float8
+        # widening noise (e.g. 43.900001525878906); re-narrow to single precision
+        # like a raw Single column. count/countdistinct are integers; Double/
+        # Decimal/Int measures keep their exact value.
+        IF agg.method != "count" AND prop.edmType == "Edm.Single" THEN
+            LET outEdm[n] = "Edm.Single"
+        ELSE
+            LET outEdm[n] = ""
+        END IF
+    END FOR
+
+    IF n == 0 THEN
+        RETURN NULL, outKeys, outEdm, FALSE, "$apply produced no output columns"
+    END IF
+    RETURN buf.toString(), outKeys, outEdm, TRUE, NULL
+END FUNCTION
+
+# Build " GROUP BY <dims>" (empty when there is no groupby). Dimension columns are
+# already validated by buildApplySelect.
+PRIVATE FUNCTION buildApplyGroupBy(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (STRING, BOOLEAN, STRING)
+    DEFINE buf base.StringBuffer
+    DEFINE i INTEGER
+    DEFINE col STRING
+
+    IF NOT query.apply.hasGroupBy OR query.apply.dims.getLength() == 0 THEN
+        RETURN "", TRUE, NULL
+    END IF
+    LET buf = base.StringBuffer.create()
+    CALL buf.append(" GROUP BY ")
+    FOR i = 1 TO query.apply.dims.getLength()
+        LET col = ODataConfig.columnFor(entity, query.apply.dims[i])
+        IF col IS NULL THEN
+            RETURN NULL, FALSE,
+                SFMT("Unknown property '%1' in $apply groupby", query.apply.dims[i])
+        END IF
+        IF i > 1 THEN CALL buf.append(", ") END IF
+        CALL buf.append(col)
+    END FOR
+    RETURN buf.toString(), TRUE, NULL
+END FUNCTION
+
+# Build " ORDER BY ..." over the aggregated result. Each $orderby term must be a
+# groupby dimension (-> its underlying column) or an aggregate alias (-> the
+# quoted alias); anything else is a 400.
+PRIVATE FUNCTION buildApplyOrderBy(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (STRING, BOOLEAN, STRING)
+    DEFINE buf base.StringBuffer
+    DEFINE i, j, emitted INTEGER
+    DEFINE term, ref STRING
+    DEFINE matched BOOLEAN
+
+    IF query.orderby.getLength() == 0 THEN
+        RETURN "", TRUE, NULL
+    END IF
+    LET buf = base.StringBuffer.create()
+    CALL buf.append(" ORDER BY ")
+    LET emitted = 0
+    FOR i = 1 TO query.orderby.getLength()
+        LET term = query.orderby[i].property
+        LET ref = NULL
+        LET matched = FALSE
+        # a groupby dimension -> order by its column
+        FOR j = 1 TO query.apply.dims.getLength()
+            IF query.apply.dims[j] == term THEN
+                LET ref = ODataConfig.columnFor(entity, term)
+                LET matched = TRUE
+                EXIT FOR
+            END IF
+        END FOR
+        # else an aggregate alias -> order by its 1-based select-list ordinal
+        # (no SQL "AS alias" is emitted, so reference the column by position).
+        IF NOT matched THEN
+            FOR j = 1 TO query.apply.aggs.getLength()
+                IF query.apply.aggs[j].alias == term THEN
+                    LET ref = (query.apply.dims.getLength() + j)
+                    LET matched = TRUE
+                    EXIT FOR
+                END IF
+            END FOR
+        END IF
+        IF NOT matched THEN
+            RETURN NULL, FALSE,
+                SFMT("$orderby '%1' is not a groupby dimension or aggregate alias", term)
+        END IF
+        LET emitted = emitted + 1
+        IF emitted > 1 THEN CALL buf.append(", ") END IF
+        CALL buf.append(ref)
+        IF query.orderby[i].descending THEN
+            CALL buf.append(" DESC")
+        END IF
+    END FOR
+    RETURN buf.toString(), TRUE, NULL
+END FUNCTION
+
+#+ TRUE for the numeric Edm types (sum / average require one).
+PRIVATE FUNCTION isNumericEdm(edm STRING) RETURNS BOOLEAN
+    CASE edm
+        WHEN "Edm.Int16" RETURN TRUE
+        WHEN "Edm.Int32" RETURN TRUE
+        WHEN "Edm.Int64" RETURN TRUE
+        WHEN "Edm.Byte" RETURN TRUE
+        WHEN "Edm.SByte" RETURN TRUE
+        WHEN "Edm.Single" RETURN TRUE
+        WHEN "Edm.Double" RETURN TRUE
+        WHEN "Edm.Decimal" RETURN TRUE
+    END CASE
+    RETURN FALSE
+END FUNCTION
+
+#+ Count of groups for $count=true (number of aggregated rows). With no groupby an
+#+ aggregate(...) yields exactly one row.
+PRIVATE FUNCTION applyCount(
+    entity ODataTypes.T_ODataEntity, query ODataTypes.T_ODataQuery)
+    RETURNS (INTEGER, BOOLEAN, STRING)
+    DEFINE params DYNAMIC ARRAY OF t_bindParam
+    DEFINE whereClause, groupCols, sql, dummy, col STRING
+    DEFINE ok BOOLEAN
+    DEFINE i, cnt INTEGER
+    DEFINE buf base.StringBuffer
+    DEFINE sqlObj base.SqlHandle
+
+    IF NOT query.apply.hasGroupBy OR query.apply.dims.getLength() == 0 THEN
+        RETURN 1, TRUE, NULL              # aggregate(...) -> a single row
+    END IF
+
+    CALL buildWhere(entity, query) RETURNING whereClause, params, ok, dummy
+    IF NOT ok THEN
+        RETURN 0, FALSE, dummy
+    END IF
+    LET buf = base.StringBuffer.create()
+    FOR i = 1 TO query.apply.dims.getLength()
+        LET col = ODataConfig.columnFor(entity, query.apply.dims[i])
+        IF i > 1 THEN CALL buf.append(", ") END IF
+        CALL buf.append(col)
+    END FOR
+    LET groupCols = buf.toString()
+    LET sql = SFMT("SELECT COUNT(*) FROM (SELECT 1 FROM %1%2 GROUP BY %3) t",
+        entity.source, whereClause, groupCols)
+    TRY
+        LET sqlObj = base.SqlHandle.create()
+        CALL sqlObj.prepare(sql)
+        FOR i = 1 TO params.getLength()
+            CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
+        END FOR
+        CALL sqlObj.open()
+        CALL sqlObj.fetch()
+        IF sqlca.sqlcode == NOTFOUND THEN
+            LET cnt = 0
+        ELSE
+            LET cnt = sqlObj.getResultValue(1)
+        END IF
+        CALL sqlObj.close()
+    CATCH
+        RETURN 0, FALSE, SFMT("Group count failed (SQLCODE %1)", sqlca.sqlcode)
+    END TRY
+    RETURN cnt, TRUE, NULL
+END FUNCTION
+
+# ---------------------------------------------------------------------------
 # Clause builders
 # ---------------------------------------------------------------------------
 

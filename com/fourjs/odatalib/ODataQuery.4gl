@@ -52,7 +52,8 @@ PUBLIC FUNCTION parse(
     skipStr STRING,
     countStr STRING,
     orderbyStr STRING,
-    expandStr STRING)
+    expandStr STRING,
+    applyStr STRING)
     RETURNS ODataTypes.T_ODataQuery
 
     DEFINE q ODataTypes.T_ODataQuery
@@ -107,6 +108,15 @@ PUBLIC FUNCTION parse(
 
     IF filterStr IS NOT NULL AND filterStr.getLength() > 0 THEN
         CALL parseFilter(filterStr, q) RETURNING q
+        IF NOT q.ok THEN RETURN q END IF
+    END IF
+
+    # $apply is parsed last; its in-pipeline filter() writes into q.filterNodes
+    # (the pre-aggregation WHERE). The service rejects $apply combined with a
+    # top-level $filter/$select/$expand before calling parse, so there is no
+    # clash with the blocks above.
+    IF applyStr IS NOT NULL AND applyStr.getLength() > 0 THEN
+        CALL parseApply(applyStr, q) RETURNING q
         IF NOT q.ok THEN RETURN q END IF
     END IF
 
@@ -385,6 +395,221 @@ PRIVATE FUNCTION splitTopLevel(s STRING, sep STRING) RETURNS DYNAMIC ARRAY OF ST
     END FOR
     LET out[out.getLength() + 1] = buf.toString()
     RETURN out
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# $apply — aggregation pipeline.
+#
+# Grammar (v1): [ filter( <pred> ) '/' ] ( groupby( '(' dims ')' [, aggregate(…)] )
+#                                        | aggregate( aggExpr ( ',' aggExpr )* ) )
+#   aggExpr = measure 'with' (sum|average|min|max|countdistinct) 'as' alias
+#           | '$count' 'as' alias
+# The leading filter() is parsed into q.filterNodes (the pre-aggregation WHERE).
+# ---------------------------------------------------------------------------
+PRIVATE FUNCTION parseApply(
+    s STRING, q ODataTypes.T_ODataQuery)
+    RETURNS ODataTypes.T_ODataQuery
+    DEFINE segs DYNAMIC ARRAY OF STRING
+    DEFINE seg STRING
+    DEFINE startSeg INTEGER
+
+    LET q.apply.present = TRUE
+    CALL splitTopLevel(s, "/") RETURNING segs
+    LET startSeg = 1
+
+    # Optional leading filter(<pred>): parse into the $filter tree (pre-agg WHERE).
+    IF segs.getLength() >= 1 AND segIsCall(segs[1].trim(), "filter") THEN
+        CALL parseFilter(callInner(segs[1].trim()), q) RETURNING q
+        IF NOT q.ok THEN RETURN q END IF
+        LET startSeg = 2
+    END IF
+
+    IF startSeg > segs.getLength() THEN
+        CALL setErr(q, "BadRequest",
+            "$apply requires a groupby or aggregate transformation") RETURNING q
+        RETURN q
+    END IF
+    LET seg = segs[startSeg].trim()
+    CASE
+        WHEN segIsCall(seg, "groupby")
+            CALL parseGroupby(callInner(seg), q) RETURNING q
+        WHEN segIsCall(seg, "aggregate")
+            CALL parseAggregateList(callInner(seg), q) RETURNING q
+        OTHERWISE
+            CALL setErr(q, "NotImplemented",
+                SFMT("Unsupported $apply transformation in '%1'", seg)) RETURNING q
+            RETURN q
+    END CASE
+    IF NOT q.ok THEN RETURN q END IF
+
+    # v1 supports exactly one transformation after the optional filter().
+    IF segs.getLength() > startSeg THEN
+        CALL setErr(q, "NotImplemented",
+            "Only a single filter()/groupby()/aggregate() $apply pipeline is supported")
+            RETURNING q
+        RETURN q
+    END IF
+    RETURN q
+END FUNCTION
+
+# Parse groupby((d1,d2)[, aggregate(...)]) — the dims group then an optional
+# nested aggregate(...).
+PRIVATE FUNCTION parseGroupby(
+    inner STRING, q ODataTypes.T_ODataQuery)
+    RETURNS ODataTypes.T_ODataQuery
+    DEFINE parts DYNAMIC ARRAY OF STRING
+    DEFINE dimsGroup, aggSeg STRING
+
+    LET q.apply.hasGroupBy = TRUE
+    CALL splitTopLevel(inner, ",") RETURNING parts
+    IF parts.getLength() == 0 THEN
+        CALL setErr(q, "BadRequest", "groupby requires a dimension list") RETURNING q
+        RETURN q
+    END IF
+    LET dimsGroup = parts[1].trim()
+    IF dimsGroup.getLength() < 2 OR dimsGroup.getCharAt(1) != "("
+        OR dimsGroup.getCharAt(dimsGroup.getLength()) != ")" THEN
+        CALL setErr(q, "BadRequest",
+            "groupby dimensions must be parenthesised, e.g. groupby((Country))") RETURNING q
+        RETURN q
+    END IF
+    CALL splitList(dimsGroup.subString(2, dimsGroup.getLength() - 1))
+        RETURNING q.apply.dims
+    IF q.apply.dims.getLength() == 0 THEN
+        CALL setErr(q, "BadRequest", "groupby requires at least one dimension") RETURNING q
+        RETURN q
+    END IF
+
+    # Optional second argument: aggregate(...).
+    IF parts.getLength() >= 2 THEN
+        LET aggSeg = parts[2].trim()
+        IF NOT segIsCall(aggSeg, "aggregate") THEN
+            CALL setErr(q, "NotImplemented",
+                "groupby's second argument must be aggregate(...)") RETURNING q
+            RETURN q
+        END IF
+        CALL parseAggregateList(callInner(aggSeg), q) RETURNING q
+        IF NOT q.ok THEN RETURN q END IF
+    END IF
+    IF parts.getLength() > 2 THEN
+        CALL setErr(q, "NotImplemented",
+            "groupby supports at most a dimension list and one aggregate(...)") RETURNING q
+        RETURN q
+    END IF
+    RETURN q
+END FUNCTION
+
+# Parse a comma-separated aggregate(...) measure list into q.apply.aggs.
+PRIVATE FUNCTION parseAggregateList(
+    inner STRING, q ODataTypes.T_ODataQuery)
+    RETURNS ODataTypes.T_ODataQuery
+    DEFINE items DYNAMIC ARRAY OF STRING
+    DEFINE words DYNAMIC ARRAY OF STRING
+    DEFINE agg ODataTypes.T_ODataAggregate
+    DEFINE i, n INTEGER
+    DEFINE method STRING
+
+    CALL splitTopLevel(inner, ",") RETURNING items
+    FOR i = 1 TO items.getLength()
+        IF items[i].trim().getLength() == 0 THEN CONTINUE FOR END IF
+        CALL splitWords(items[i]) RETURNING words
+        INITIALIZE agg.* TO NULL
+        IF words.getLength() >= 1 AND words[1].toLowerCase() == "$count" THEN
+            # $count as Alias
+            IF words.getLength() != 3 OR words[2].toLowerCase() != "as" THEN
+                CALL setErr(q, "BadRequest",
+                    SFMT("Malformed aggregate '%1' (expected $count as Alias)", items[i].trim()))
+                    RETURNING q
+                RETURN q
+            END IF
+            LET agg.source = NULL
+            LET agg.method = "count"
+            LET agg.alias = words[3]
+        ELSE
+            # Measure with method as Alias
+            IF words.getLength() != 5 OR words[2].toLowerCase() != "with"
+                OR words[4].toLowerCase() != "as" THEN
+                CALL setErr(q, "BadRequest",
+                    SFMT("Malformed aggregate '%1' (expected Measure with method as Alias)", items[i].trim()))
+                    RETURNING q
+                RETURN q
+            END IF
+            LET method = words[3].toLowerCase()
+            CASE method
+                WHEN "sum"
+                WHEN "average"
+                WHEN "min"
+                WHEN "max"
+                WHEN "countdistinct"
+                OTHERWISE
+                    CALL setErr(q, "BadRequest",
+                        SFMT("Unsupported aggregate method '%1'", words[3])) RETURNING q
+                    RETURN q
+            END CASE
+            LET agg.source = words[1]
+            LET agg.method = method
+            LET agg.alias = words[5]
+        END IF
+        IF NOT isIdentifier(agg.alias) THEN
+            CALL setErr(q, "BadRequest",
+                SFMT("Invalid aggregate alias '%1'", agg.alias)) RETURNING q
+            RETURN q
+        END IF
+        LET n = q.apply.aggs.getLength() + 1
+        LET q.apply.aggs[n].* = agg.*
+    END FOR
+    RETURN q
+END FUNCTION
+
+#+ TRUE when seg is "<name>(...)" — starts with name + '(' and ends with ')'.
+PRIVATE FUNCTION segIsCall(seg STRING, name STRING) RETURNS BOOLEAN
+    DEFINE pfx STRING
+    IF seg IS NULL THEN RETURN FALSE END IF
+    LET pfx = SFMT("%1(", name)
+    IF seg.getLength() < pfx.getLength() + 1 THEN RETURN FALSE END IF
+    IF seg.subString(1, pfx.getLength()).toLowerCase() != pfx THEN RETURN FALSE END IF
+    RETURN seg.getCharAt(seg.getLength()) == ")"
+END FUNCTION
+
+#+ The argument text between the first '(' and the last ')' of a "name(...)" call.
+PRIVATE FUNCTION callInner(seg STRING) RETURNS STRING
+    DEFINE lp INTEGER
+    LET lp = seg.getIndexOf("(", 1)
+    RETURN seg.subString(lp + 1, seg.getLength() - 1)
+END FUNCTION
+
+#+ Split on runs of whitespace into non-empty trimmed words.
+PRIVATE FUNCTION splitWords(s STRING) RETURNS DYNAMIC ARRAY OF STRING
+    DEFINE out DYNAMIC ARRAY OF STRING
+    DEFINE st base.StringTokenizer
+    DEFINE w STRING
+    LET st = base.StringTokenizer.create(s, " \t")
+    WHILE st.hasMoreTokens()
+        LET w = st.nextToken().trim()
+        IF w.getLength() > 0 THEN
+            LET out[out.getLength() + 1] = w
+        END IF
+    END WHILE
+    RETURN out
+END FUNCTION
+
+#+ TRUE for a safe SQL/JSON identifier: [A-Za-z_][A-Za-z0-9_]* (alias guard).
+PRIVATE FUNCTION isIdentifier(s STRING) RETURNS BOOLEAN
+    DEFINE i INTEGER
+    DEFINE c STRING
+    IF s IS NULL OR s.getLength() == 0 THEN RETURN FALSE END IF
+    LET c = s.getCharAt(1)
+    IF NOT ((c >= "A" AND c <= "Z") OR (c >= "a" AND c <= "z") OR c == "_") THEN
+        RETURN FALSE
+    END IF
+    FOR i = 2 TO s.getLength()
+        LET c = s.getCharAt(i)
+        IF NOT ((c >= "A" AND c <= "Z") OR (c >= "a" AND c <= "z")
+            OR (c >= "0" AND c <= "9") OR c == "_") THEN
+            RETURN FALSE
+        END IF
+    END FOR
+    RETURN TRUE
 END FUNCTION
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,12 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
 
   `$expand=*`, `$compute`/`$search`/`$apply`/`$levels`/lambda inside a nested
   option, and composite-column joins return `501`.
+- `$apply` — server-side aggregation (SQL providers): `aggregate(…)` for grand
+  totals and `groupby((dims)[, aggregate(…)])` for grouped rows, with an optional
+  leading `filter(<pred>)` pre-aggregation segment. Methods: `sum`, `average`,
+  `min`, `max`, `countdistinct`, and `$count as <alias>`. `$orderby`/`$top`/
+  `$skip`/`$count` apply to the aggregated result. Example:
+  `Orders?$apply=filter(Freight gt 50)/groupby((ShipCountry),aggregate($count as N))`
 
 Malformed options return a `400 BadRequest`; unsupported-but-recognised
 constructs return `501 NotImplemented`; both as OData error envelopes.
@@ -381,8 +387,10 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- `$batch`, `$apply`, delta/change-tracking, actions/functions; `$expand=*`,
-  `$levels`, nested lambda, and single-valued navigation-path comparisons
+- `$batch`, delta/change-tracking, actions/functions; `$expand=*`, `$levels`,
+  nested lambda, single-valued navigation-path comparisons, and `$apply`
+  transformations beyond `filter`/`groupby`/`aggregate` (e.g. `compute`,
+  `topcount`) or post-aggregation `$filter`
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
 
@@ -449,6 +457,20 @@ including Power BI; the body is well-formed CSDL.
   the existing filter tree (no new type). SQL providers, single-pair joins;
   function-provider host/target, nested lambda, and composite joins return `501`.
   Verified on live GAS against PostgreSQL.
+- *`$apply` (server-side aggregation).* `aggregate(…)` (grand totals) and
+  `groupby((dims)[, aggregate(…)])` (grouped rows) with an optional leading
+  `filter(<pred>)` pre-aggregation segment (which reuses the full `$filter`
+  grammar, lambda included). Methods `sum`/`average`/`min`/`max`/`countdistinct`
+  and `$count as <alias>` compile to `SUM`/`AVG`/`MIN`/`MAX`/`COUNT(DISTINCT …)`/
+  `COUNT(*)` with a `GROUP BY` over the dimensions; `$orderby`/`$top`/`$skip`
+  page/sort the grouped result and `$count` returns the group count. The result
+  is dynamic columns (dimension property names + aggregate aliases) flowing
+  through the standard collection envelope. Aggregates over an `Edm.Single`
+  measure are re-narrowed to single precision. Aliases are validated identifiers;
+  `sum`/`average` require a numeric measure. SQL providers only; `$apply` combined
+  with `$select`/`$expand`/top-level `$filter`, on a key request, against a
+  function provider, or any other transformation returns `501`/`400`. Verified on
+  live GAS against PostgreSQL.
 - *Service loop lifecycle.* `ODataService.run()` now only terminates the DVM on
   `-2` / `-4` / `-10` (per the documented engine contract); transient
   per-connection codes such as `-3` no longer end the process, so the GAS pool

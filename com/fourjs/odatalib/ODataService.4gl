@@ -138,6 +138,7 @@ PUBLIC FUNCTION getEntitySet(
     pCount STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$count"),
     pOrderby STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$orderby"),
     pExpand STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$expand"),
+    pApply STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$apply"),
     hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
     hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
     ATTRIBUTES(WSGet,
@@ -196,6 +197,11 @@ PUBLIC FUNCTION getEntitySet(
 
     # --- single entity by key -------------------------------------------------
     IF isKeyReq THEN
+        IF pApply IS NOT NULL AND pApply.getLength() > 0 THEN
+            CALL ODataError.raiseCode("BadRequest",
+                "$apply is not applicable to a single-entity (key) request")
+            RETURN NULL
+        END IF
         CALL parseKeyPredicate(keyVal) RETURNING keyParts
         LET result = ODataProvider.fetchByKeys(ent, keyParts)
         IF NOT result.ok THEN
@@ -204,7 +210,7 @@ PUBLIC FUNCTION getEntitySet(
         END IF
         # $expand on a single entity (other options are not applied to a key get).
         IF pExpand IS NOT NULL AND pExpand.getLength() > 0 THEN
-            LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, pExpand)
+            LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, pExpand, NULL)
             IF NOT q.ok THEN
                 CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
                 RETURN NULL
@@ -226,8 +232,21 @@ PUBLIC FUNCTION getEntitySet(
     END IF
 
     # --- entity collection ----------------------------------------------------
+    # $apply (aggregation) reshapes the result, so it cannot be combined with
+    # $select/$expand/top-level $filter; pre-aggregation filtering uses the
+    # in-pipeline filter(...) instead.
+    IF pApply IS NOT NULL AND pApply.getLength() > 0 THEN
+        IF (pSelect IS NOT NULL AND pSelect.getLength() > 0)
+            OR (pExpand IS NOT NULL AND pExpand.getLength() > 0)
+            OR (pFilter IS NOT NULL AND pFilter.getLength() > 0) THEN
+            CALL ODataError.raiseCode("NotImplemented",
+                "$apply cannot be combined with $select, $expand or $filter; use the in-pipeline filter(...) transformation")
+            RETURN NULL
+        END IF
+    END IF
+
     LET q = ODataQuery.parse(
-        pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand)
+        pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply)
     IF NOT q.ok THEN
         CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
         RETURN NULL

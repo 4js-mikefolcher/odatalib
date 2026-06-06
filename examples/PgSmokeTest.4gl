@@ -146,8 +146,76 @@ MAIN
     CALL ODataConfig.findEntity("CountrySummary") RETURNING ent.*, found
     CALL showCollection(ent, NULL, "Customers/any()", NULL, NULL, NULL, NULL)
 
+    # --- $apply (aggregation) -------------------------------------------------
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    DISPLAY "\n== Orders?$apply=aggregate($count as N, Freight with sum as F)  (expect N=856, F=65450.10) =="
+    CALL showApply(ent, "aggregate($count as N, Freight with sum as F)", NULL, NULL, NULL)
+
+    DISPLAY "\n== Orders?$apply=groupby((ShipCountry),aggregate($count as N))&$orderby=N desc&$top=3  (USA 142, Germany 124, Brazil 83) =="
+    CALL showApply(ent, "groupby((ShipCountry),aggregate($count as N))", "N desc", "3", NULL)
+
+    DISPLAY "\n== Orders?$apply=filter(Freight gt 50)/groupby((ShipCountry),aggregate($count as N))&$orderby=N desc&$top=3  (USA 62, Germany 58, Austria 33) =="
+    CALL showApply(ent,
+        "filter(Freight gt 50)/groupby((ShipCountry),aggregate($count as N))",
+        "N desc", "3", NULL)
+
+    DISPLAY "\n== Orders?$apply=groupby((ShipCountry),aggregate(CustomerID with countdistinct as Custs))&$orderby=ShipCountry&$top=3 =="
+    CALL showApply(ent,
+        "groupby((ShipCountry),aggregate(CustomerID with countdistinct as Custs))",
+        "ShipCountry", "3", NULL)
+
+    CALL ODataConfig.findEntity("Products") RETURNING ent.*, found
+    DISPLAY "\n== Products?$apply=groupby((CategoryID),aggregate(UnitPrice with average as AvgPrice, UnitPrice with max as MaxPrice))&$orderby=CategoryID&$top=3  (cat1 avg~30.75 max 263.5) =="
+    CALL showApply(ent,
+        "groupby((CategoryID),aggregate(UnitPrice with average as AvgPrice, UnitPrice with max as MaxPrice))",
+        "CategoryID", "3", NULL)
+
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    DISPLAY "\n== Customers?$apply=groupby((Country))&$count=true&$top=3  (expect @odata.count=21) =="
+    CALL showApply(ent, "groupby((Country))", "Country", "3", "true")
+
+    # --- $apply error paths ---------------------------------------------------
+    DISPLAY "\n== Customers?$apply=aggregate(CompanyName with sum as X)  (non-numeric, expect 400) =="
+    CALL showApply(ent, "aggregate(CompanyName with sum as X)", NULL, NULL, NULL)
+
+    DISPLAY "\n== Customers?$apply=groupby((Bogus))  (expect 400) =="
+    CALL showApply(ent, "groupby((Bogus))", NULL, NULL, NULL)
+
+    DISPLAY "\n== Orders?$apply=topcount(5,Freight)  (expect 501) =="
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    CALL showApply(ent, "topcount(5,Freight)", NULL, NULL, NULL)
+
+    DISPLAY "\n== CountrySummary?$apply=aggregate($count as N)  (function host, expect 501) =="
+    CALL ODataConfig.findEntity("CountrySummary") RETURNING ent.*, found
+    CALL showApply(ent, "aggregate($count as N)", NULL, NULL, NULL)
+
     DISCONNECT CURRENT
 END MAIN
+
+#+ Parse $apply (+ optional $orderby/$top/$count), fetch via the provider (which
+#+ routes aggregation to applyFetch), and print the serialised result or error.
+FUNCTION showApply(
+    ent ODataTypes.T_ODataEntity,
+    pApply STRING, pOrderby STRING, pTop STRING, pCount STRING)
+    DEFINE q ODataTypes.T_ODataQuery
+    DEFINE result ODataTypes.T_ODataResult
+    DEFINE obj util.JSONObject
+
+    LET q = ODataQuery.parse(NULL, NULL, pTop, NULL, pCount, pOrderby, NULL, pApply)
+    IF NOT q.ok THEN
+        DISPLAY SFMT("  query error [%1]: %2", q.errorCode, q.errorMessage)
+        RETURN
+    END IF
+    LET result = ODataProvider.fetch(ent, q)
+    IF NOT result.ok THEN
+        DISPLAY SFMT("  provider error [%1]: %2",
+            result.errorCode, result.errorMessage)
+        RETURN
+    END IF
+    LET obj = ODataSerializer.buildCollection(
+        baseUrl, ent.name, result, q.wantCount, NULL)
+    DISPLAY obj.toString()
+END FUNCTION
 
 #+ Parse $select/$filter/$top/$expand, fetch the collection, apply expansion
 #+ in-process, and print the serialised result (or the parse/expand error).
@@ -160,7 +228,7 @@ FUNCTION showExpand(
     DEFINE eok BOOLEAN
     DEFINE ecode, emsg STRING
 
-    LET q = ODataQuery.parse(pSelect, pFilter, pTop, NULL, NULL, NULL, pExpand)
+    LET q = ODataQuery.parse(pSelect, pFilter, pTop, NULL, NULL, NULL, pExpand, NULL)
     IF NOT q.ok THEN
         DISPLAY SFMT("  query error [%1]: %2", q.errorCode, q.errorMessage)
         RETURN
@@ -194,7 +262,7 @@ FUNCTION showCollection(
     DEFINE result ODataTypes.T_ODataResult
     DEFINE obj util.JSONObject
 
-    LET q = ODataQuery.parse(pSelect, pFilter, pTop, pSkip, pCount, pOrderby, NULL)
+    LET q = ODataQuery.parse(pSelect, pFilter, pTop, pSkip, pCount, pOrderby, NULL, NULL)
     IF NOT q.ok THEN
         DISPLAY SFMT("  query error [%1]: %2", q.errorCode, q.errorMessage)
         RETURN

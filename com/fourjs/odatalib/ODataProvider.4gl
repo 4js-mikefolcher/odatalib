@@ -25,6 +25,19 @@ PUBLIC FUNCTION fetch(
     RETURNS ODataTypes.T_ODataResult
     DEFINE res ODataTypes.T_ODataResult
 
+    # $apply (aggregation) reshapes the result into dynamic columns; only the SQL
+    # provider can express it (a function callback returns fixed entity rows).
+    IF query.apply.present THEN
+        IF entity.provider == "sql" THEN
+            RETURN ODataSqlProvider.applyFetch(entity, query)
+        END IF
+        LET res.ok = FALSE
+        LET res.errorCode = "NotImplemented"
+        LET res.errorMessage =
+            SFMT("$apply is not supported on function-backed entity '%1'", entity.name)
+        RETURN res
+    END IF
+
     CASE entity.provider
         WHEN "sql"
             RETURN ODataSqlProvider.fetch(entity, query)

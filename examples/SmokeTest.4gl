@@ -87,7 +87,7 @@ FUNCTION showCollection(
     DEFINE result ODataTypes.T_ODataResult
     DEFINE obj util.JSONObject
 
-    LET q = ODataQuery.parse(pSelect, pFilter, pTop, pSkip, pCount, pOrderby, NULL)
+    LET q = ODataQuery.parse(pSelect, pFilter, pTop, pSkip, pCount, pOrderby, NULL, NULL)
     IF NOT q.ok THEN
         DISPLAY SFMT("  query error [%1]: %2", q.errorCode, q.errorMessage)
         RETURN

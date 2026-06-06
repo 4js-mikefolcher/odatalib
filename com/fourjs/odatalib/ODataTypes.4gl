@@ -134,6 +134,30 @@ PUBLIC TYPE T_ODataExpandNode RECORD
     childRoots DYNAMIC ARRAY OF INTEGER
 END RECORD
 
+# One aggregate measure inside an $apply aggregate(...) clause.
+#   source = measure property name (empty for the $count row count)
+#   method = sum | average | min | max | countdistinct | count
+#   alias  = output JSON key (a validated [A-Za-z_][A-Za-z0-9_]* identifier,
+#            since it is emitted into the SQL AS clause)
+PUBLIC TYPE T_ODataAggregate RECORD
+    source STRING,
+    method STRING,
+    alias STRING
+END RECORD
+
+# Parsed $apply pipeline (v1: an optional leading filter(...) — parsed into the
+# query's filterNodes as the pre-aggregation WHERE — then one groupby/aggregate).
+#   present    = a $apply was supplied (route to the aggregation provider path)
+#   hasGroupBy = a groupby(...) transformation is present
+#   dims       = groupby dimension property names (output as their property names)
+#   aggs       = aggregate measures (may be empty for a bare groupby((dims)))
+PUBLIC TYPE T_ODataApply RECORD
+    present BOOLEAN,
+    hasGroupBy BOOLEAN,
+    dims DYNAMIC ARRAY OF STRING,
+    aggs DYNAMIC ARRAY OF T_ODataAggregate
+END RECORD
+
 # The full parsed set of query options for a collection request.
 PUBLIC TYPE T_ODataQuery RECORD
     selectList DYNAMIC ARRAY OF STRING,
@@ -150,6 +174,7 @@ PUBLIC TYPE T_ODataQuery RECORD
     # expandRoots holds the indices of the top-level expand items. 0/empty => none.
     expandNodes DYNAMIC ARRAY OF T_ODataExpandNode,
     expandRoots DYNAMIC ARRAY OF INTEGER,
+    apply T_ODataApply,     # parsed $apply aggregation pipeline (apply.present)
     top INTEGER,
     skip INTEGER,
     hasTop BOOLEAN,
