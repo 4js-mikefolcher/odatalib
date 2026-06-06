@@ -87,6 +87,14 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
   `min`, `max`, `countdistinct`, and `$count as <alias>`. `$orderby`/`$top`/
   `$skip`/`$count` apply to the aggregated result. Example:
   `Orders?$apply=filter(Freight gt 50)/groupby((ShipCountry),aggregate($count as N))`
+- `$batch` — JSON batch (OData v4.01): `POST /$batch` with
+  `{"requests":[{"id","method":"GET","url"}, …]}` runs a bundle of independent
+  `GET`s and returns `{"responses":[{"id","status","body"}, …]}`. Each sub-request
+  is routed through the same logic as a direct `GET` (all query options work
+  inside a sub-URL), authorised with the batch request's own headers, and
+  **continue-on-error** (a failing sub-request is isolated; the batch returns
+  `200`). Read-only: a non-`GET` sub-request → `405`, `$metadata` in a batch →
+  `501`; only `application/json` is accepted (multipart/mixed is rejected).
 
 Malformed options return a `400 BadRequest`; unsupported-but-recognised
 constructs return `501 NotImplemented`; both as OData error envelopes.
@@ -387,7 +395,7 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- `$batch`, delta/change-tracking, actions/functions; `$expand=*`, `$levels`,
+- multipart/mixed `$batch`, delta/change-tracking, actions/functions; `$expand=*`, `$levels`,
   nested lambda, single-valued navigation-path comparisons, and `$apply`
   transformations beyond `filter`/`groupby`/`aggregate` (e.g. `compute`,
   `topcount`) or post-aggregation `$filter`
@@ -471,6 +479,16 @@ including Power BI; the body is well-formed CSDL.
   with `$select`/`$expand`/top-level `$filter`, on a key request, against a
   function provider, or any other transformation returns `501`/`400`. Verified on
   live GAS against PostgreSQL.
+- *`$batch` (JSON batch, OData v4.01).* `POST /$batch` runs a `requests` array of
+  independent `GET`s and returns a `responses` array (`id`/`status`/`body`). Every
+  request — direct or batched — flows through one non-raising dispatch core
+  (`dispatchGet`): the direct `GET` maps an error outcome onto `SetRestError`,
+  while a sub-request echoes the same `status`+`body` inside the batch, so batched
+  behaviour cannot drift from direct. All query options work inside a sub-URL
+  (parsed + percent-decoded), authorisation uses the batch request's headers, and
+  it is continue-on-error (the batch returns `200`; failures are isolated per
+  sub-response). Read-only: a non-`GET` sub-request → `405`, `$metadata` → `501`;
+  JSON only (a non-JSON body is rejected). Verified on live GAS against PostgreSQL.
 - *Service loop lifecycle.* `ODataService.run()` now only terminates the DVM on
   `-2` / `-4` / `-10` (per the documented engine contract); transient
   per-connection codes such as `-3` no longer end the process, so the GAS pool

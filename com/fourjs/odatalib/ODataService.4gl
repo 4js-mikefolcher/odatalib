@@ -146,19 +146,9 @@ PUBLIC FUNCTION getEntitySet(
         WSDescription = "OData entity collection")
     RETURNS util.JSONObject ATTRIBUTES(WSMedia = "application/json")
 
-    DEFINE ent ODataTypes.T_ODataEntity
-    DEFINE found, isKeyReq BOOLEAN
-    DEFINE q ODataTypes.T_ODataQuery
-    DEFINE result ODataTypes.T_ODataResult
-    DEFINE authRes ODataTypes.T_ODataAuthResult
-    DEFINE authCtx ODataTypes.T_ODataAuthContext
-    DEFINE baseUrl, nextLink, name, keyVal STRING
-    DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
-    DEFINE resp util.JSONObject
-    DEFINE eok BOOLEAN
-    DEFINE ecode, emsg STRING
-
-    LET baseUrl = serviceBaseUrl()
+    DEFINE isKeyReq BOOLEAN
+    DEFINE name, keyVal STRING
+    DEFINE sub ODataTypes.T_ODataSubResponse
 
     # Defensive guard if a literal path leaked into the placeholder route.
     IF entitySet == "$metadata" THEN
@@ -168,9 +158,48 @@ PUBLIC FUNCTION getEntitySet(
     END IF
 
     # A single OData segment is either "Set" (collection) or "Set(key)" (entity).
-    # keyVal is the raw predicate inside the parentheses (parsed below once the
-    # request is authorised and the entity is known).
     CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
+
+    # All request handling runs through the shared, non-raising core; the direct
+    # GET maps an error outcome onto SetRestError (so the HTTP envelope carries
+    # the status), while $batch echoes the same outcome inside its response body.
+    CALL dispatchGet(name, keyVal, isKeyReq,
+            pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply,
+            hScopes, hUser, serviceBaseUrl())
+        RETURNING sub.*
+    IF sub.status >= 400 THEN
+        CALL ODataError.raise(sub.status, sub.code, sub.message)
+        RETURN NULL
+    END IF
+    RETURN sub.body
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# Shared request core (non-raising) — used by the direct GET and by $batch
+# ---------------------------------------------------------------------------
+
+#+ Handle one GET request (collection / key lookup) and RETURN its outcome
+#+ instead of raising it: (status, errorCode, errorMessage, body). On success
+#+ body is the payload JSON and status is 200; on failure body is the OData
+#+ error envelope and status is the mapped HTTP code. This is the single source
+#+ of truth for request handling — getEntitySet and batch() both call it.
+PRIVATE FUNCTION dispatchGet(
+    name STRING, keyVal STRING, isKeyReq BOOLEAN,
+    pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
+    pOrderby STRING, pExpand STRING, pApply STRING,
+    hScopes STRING, hUser STRING, baseUrl STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE ent ODataTypes.T_ODataEntity
+    DEFINE found BOOLEAN
+    DEFINE q ODataTypes.T_ODataQuery
+    DEFINE result ODataTypes.T_ODataResult
+    DEFINE authRes ODataTypes.T_ODataAuthResult
+    DEFINE authCtx ODataTypes.T_ODataAuthContext
+    DEFINE nextLink STRING
+    DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
+    DEFINE resp util.JSONObject
+    DEFINE eok BOOLEAN
+    DEFINE ecode, emsg STRING
 
     # Authorization hook (no-op when no authorizer is registered). Checked on the
     # requested name before existence is confirmed, so denial does not reveal
@@ -179,56 +208,46 @@ PUBLIC FUNCTION getEntitySet(
     LET authRes = ODataAuth.authorize(authCtx)
     IF NOT authRes.allowed THEN
         IF authRes.status == 401 THEN
-            CALL ODataError.raise(401, "Unauthorized",
+            RETURN subErr(401, "Unauthorized",
                 NVL(authRes.message, "Authentication required"))
-        ELSE
-            CALL ODataError.raise(403, "Forbidden",
-                NVL(authRes.message, "Access denied"))
         END IF
-        RETURN NULL
+        RETURN subErr(403, "Forbidden", NVL(authRes.message, "Access denied"))
     END IF
 
     CALL ODataConfig.findEntity(name) RETURNING ent.*, found
     IF NOT found THEN
-        CALL ODataError.raiseCode("NotFound",
-            SFMT("Entity set '%1' not found", name))
-        RETURN NULL
+        RETURN subErrCode("NotFound", SFMT("Entity set '%1' not found", name))
     END IF
 
     # --- single entity by key -------------------------------------------------
     IF isKeyReq THEN
         IF pApply IS NOT NULL AND pApply.getLength() > 0 THEN
-            CALL ODataError.raiseCode("BadRequest",
+            RETURN subErrCode("BadRequest",
                 "$apply is not applicable to a single-entity (key) request")
-            RETURN NULL
         END IF
         CALL parseKeyPredicate(keyVal) RETURNING keyParts
         LET result = ODataProvider.fetchByKeys(ent, keyParts)
         IF NOT result.ok THEN
-            CALL ODataError.raiseCode(result.errorCode, result.errorMessage)
-            RETURN NULL
+            RETURN subErrCode(result.errorCode, result.errorMessage)
         END IF
         # $expand on a single entity (other options are not applied to a key get).
         IF pExpand IS NOT NULL AND pExpand.getLength() > 0 THEN
             LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, pExpand, NULL)
             IF NOT q.ok THEN
-                CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
-                RETURN NULL
+                RETURN subErrCode(q.errorCode, q.errorMessage)
             END IF
             CALL ODataExpand.apply(ent, q, result.rows)
                 RETURNING eok, ecode, emsg
             IF NOT eok THEN
-                CALL ODataError.raiseCode(ecode, emsg)
-                RETURN NULL
+                RETURN subErrCode(ecode, emsg)
             END IF
         END IF
         LET resp = ODataSerializer.buildEntity(baseUrl, name, result)
         IF resp IS NULL THEN
-            CALL ODataError.raiseCode("NotFound",
+            RETURN subErrCode("NotFound",
                 SFMT("No %1 with key '%2'", name, keyVal))
-            RETURN NULL
         END IF
-        RETURN resp
+        RETURN subOk(resp)
     END IF
 
     # --- entity collection ----------------------------------------------------
@@ -239,17 +258,15 @@ PUBLIC FUNCTION getEntitySet(
         IF (pSelect IS NOT NULL AND pSelect.getLength() > 0)
             OR (pExpand IS NOT NULL AND pExpand.getLength() > 0)
             OR (pFilter IS NOT NULL AND pFilter.getLength() > 0) THEN
-            CALL ODataError.raiseCode("NotImplemented",
+            RETURN subErrCode("NotImplemented",
                 "$apply cannot be combined with $select, $expand or $filter; use the in-pipeline filter(...) transformation")
-            RETURN NULL
         END IF
     END IF
 
     LET q = ODataQuery.parse(
         pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply)
     IF NOT q.ok THEN
-        CALL ODataError.raiseCode(q.errorCode, q.errorMessage)
-        RETURN NULL
+        RETURN subErrCode(q.errorCode, q.errorMessage)
     END IF
 
     # Make sure the navigation join keys are fetched even under a narrow $select.
@@ -259,16 +276,14 @@ PUBLIC FUNCTION getEntitySet(
 
     LET result = ODataProvider.fetch(ent, q)
     IF NOT result.ok THEN
-        CALL ODataError.raiseCode(result.errorCode, result.errorMessage)
-        RETURN NULL
+        RETURN subErrCode(result.errorCode, result.errorMessage)
     END IF
 
     IF q.expandRoots.getLength() > 0 THEN
         CALL ODataExpand.apply(ent, q, result.rows)
             RETURNING eok, ecode, emsg
         IF NOT eok THEN
-            CALL ODataError.raiseCode(ecode, emsg)
-            RETURN NULL
+            RETURN subErrCode(ecode, emsg)
         END IF
     END IF
 
@@ -278,8 +293,118 @@ PUBLIC FUNCTION getEntitySet(
             pSelect, pFilter, pOrderby, pCount, pExpand)
     END IF
 
-    RETURN ODataSerializer.buildCollection(
-        baseUrl, name, result, q.wantCount, nextLink)
+    RETURN subOk(ODataSerializer.buildCollection(
+        baseUrl, name, result, q.wantCount, nextLink))
+END FUNCTION
+
+#+ A success sub-response (HTTP 200) carrying the payload.
+PRIVATE FUNCTION subOk(body util.JSONObject) RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE r ODataTypes.T_ODataSubResponse
+    LET r.status = 200
+    LET r.body = body
+    RETURN r
+END FUNCTION
+
+#+ An error sub-response with an explicit HTTP status; body is the OData error
+#+ envelope object so it can be echoed inside a batch response.
+PRIVATE FUNCTION subErr(status INTEGER, code STRING, message STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE r ODataTypes.T_ODataSubResponse
+    DEFINE err util.JSONObject
+    LET r.status = status
+    LET r.code = code
+    LET r.message = message
+    LET err = util.JSONObject.create()
+    CALL err.put("code", code)
+    CALL err.put("message", message)
+    LET r.body = util.JSONObject.create()
+    CALL r.body.put("error", err)
+    RETURN r
+END FUNCTION
+
+#+ An error sub-response whose HTTP status is derived from the framework code.
+PRIVATE FUNCTION subErrCode(code STRING, message STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    RETURN subErr(ODataError.httpStatusFor(code), code, message)
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# $batch (JSON batch, OData v4.01) — read-only: a bundle of independent GETs
+# ---------------------------------------------------------------------------
+
+#+ Execute a JSON batch. Each sub-request runs through the same dispatchGet core
+#+ as a direct GET; statuses/bodies are echoed per request id and the batch
+#+ itself always returns 200 (continue-on-error). JSON batch only — a non-JSON
+#+ Content-Type (e.g. multipart/mixed) returns 415.
+PUBLIC FUNCTION batch(req ODataTypes.T_ODataBatchRequest)
+    ATTRIBUTES(WSPost,
+        WSPath = "/$batch",
+        WSDescription = "OData JSON batch ($batch)")
+    RETURNS util.JSONObject ATTRIBUTES(WSMedia = "application/json")
+    DEFINE root, respObj util.JSONObject
+    DEFINE responses util.JSONArray
+    DEFINE i INTEGER
+    DEFINE ctype, mverb STRING
+    DEFINE sub ODataTypes.T_ODataSubResponse
+
+    # JSON batch only: reject a multipart/mixed (or other non-JSON) body.
+    LET ctype = ctx["Content-Type"]
+    IF ctype IS NOT NULL AND ctype.getLength() > 0
+        AND ctype.toLowerCase().getIndexOf("json", 1) == 0 THEN
+        CALL ODataError.raise(415, "UnsupportedMediaType",
+            "$batch requires application/json (JSON batch, OData v4.01); multipart/mixed is not supported")
+        RETURN NULL
+    END IF
+
+    LET responses = util.JSONArray.create()
+    FOR i = 1 TO req.requests.getLength()
+        LET mverb = req.requests[i].method
+        IF mverb IS NULL OR mverb.toUpperCase() != "GET" THEN
+            # read-only service: only GET sub-requests are allowed.
+            LET sub = subErr(405, "MethodNotAllowed",
+                SFMT("Method '%1' is not allowed (read-only service)", mverb))
+        ELSE
+            CALL dispatchBatchUrl(req.requests[i].url) RETURNING sub.*
+        END IF
+        LET respObj = util.JSONObject.create()
+        CALL respObj.put("id", req.requests[i].id)
+        CALL respObj.put("status", sub.status)
+        CALL respObj.put("body", sub.body)
+        CALL responses.put(responses.getLength() + 1, respObj)
+    END FOR
+
+    LET root = util.JSONObject.create()
+    CALL root.put("responses", responses)
+    RETURN root
+END FUNCTION
+
+#+ Route one batch sub-request URL (service-root-relative) through dispatchGet.
+#+ Authorization uses the batch POST's own headers/context.
+PRIVATE FUNCTION dispatchBatchUrl(url STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE pathSeg, queryStr, name, keyVal STRING
+    DEFINE isKeyReq BOOLEAN
+    DEFINE opts DICTIONARY OF STRING
+
+    CALL splitSubUrl(url) RETURNING pathSeg, queryStr
+
+    # empty path -> service document
+    IF pathSeg IS NULL OR pathSeg.getLength() == 0 THEN
+        RETURN subOk(ODataSerializer.buildServiceDocument(serviceBaseUrl()))
+    END IF
+    IF pathSeg == "$metadata" THEN
+        RETURN subErrCode("NotImplemented",
+            "$metadata is not available inside a $batch; request GET /$metadata directly")
+    END IF
+
+    CALL parseQueryOptions(queryStr) RETURNING opts
+    CALL splitEntityKey(pathSeg) RETURNING name, keyVal, isKeyReq
+
+    RETURN dispatchGet(name, keyVal, isKeyReq,
+        optVal(opts, "$select"), optVal(opts, "$filter"), optVal(opts, "$top"),
+        optVal(opts, "$skip"), optVal(opts, "$count"), optVal(opts, "$orderby"),
+        optVal(opts, "$expand"), optVal(opts, "$apply"),
+        ctx["X-OData-Scopes"], ctx["X-OData-User"], serviceBaseUrl())
 END FUNCTION
 
 # ---------------------------------------------------------------------------
@@ -342,6 +467,136 @@ PRIVATE FUNCTION serviceBaseUrl() RETURNS STRING
         LET u = u.subString(1, u.getLength() - 1)
     END IF
     RETURN u
+END FUNCTION
+
+# ---------------------------------------------------------------------------
+# $batch sub-request URL parsing
+# ---------------------------------------------------------------------------
+
+#+ Split a service-root-relative sub-request URL into (pathSegment, queryString).
+#+ Strips a leading '/'; the path is percent-decoded so an encoded key value
+#+ (e.g. Customers(%27ALFKI%27)) reaches splitEntityKey/parseKeyPredicate raw.
+#+ The query string is returned still-encoded (parseQueryOptions decodes values).
+PRIVATE FUNCTION splitSubUrl(url STRING) RETURNS (STRING, STRING)
+    DEFINE p, qs STRING
+    DEFINE qpos INTEGER
+    IF url IS NULL THEN
+        RETURN NULL, NULL
+    END IF
+    LET p = url.trim()
+    WHILE p.getLength() > 0 AND p.getCharAt(1) == "/"
+        LET p = p.subString(2, p.getLength())
+    END WHILE
+    LET qpos = p.getIndexOf("?", 1)
+    IF qpos > 0 THEN
+        LET qs = p.subString(qpos + 1, p.getLength())
+        LET p = p.subString(1, qpos - 1)
+    ELSE
+        LET qs = NULL
+    END IF
+    RETURN percentDecode(p), qs
+END FUNCTION
+
+#+ Parse a query string ("a=b&c=d") into a name->value dictionary, percent-
+#+ decoding each key and value. A bare key (no '=') maps to an empty string.
+PRIVATE FUNCTION parseQueryOptions(queryStr STRING) RETURNS DICTIONARY OF STRING
+    DEFINE d DICTIONARY OF STRING
+    DEFINE st base.StringTokenizer
+    DEFINE pair, k, v STRING
+    DEFINE eq INTEGER
+    IF queryStr IS NULL OR queryStr.getLength() == 0 THEN
+        RETURN d
+    END IF
+    LET st = base.StringTokenizer.create(queryStr, "&")
+    WHILE st.hasMoreTokens()
+        LET pair = st.nextToken()
+        IF pair.getLength() == 0 THEN CONTINUE WHILE END IF
+        LET eq = pair.getIndexOf("=", 1)
+        IF eq > 0 THEN
+            LET k = percentDecode(pair.subString(1, eq - 1))
+            LET v = percentDecode(pair.subString(eq + 1, pair.getLength()))
+        ELSE
+            LET k = percentDecode(pair)
+            LET v = ""
+        END IF
+        IF k.getLength() > 0 THEN
+            LET d[k] = v
+        END IF
+    END WHILE
+    RETURN d
+END FUNCTION
+
+#+ Dictionary lookup that returns NULL for an absent key (rather than erroring).
+PRIVATE FUNCTION optVal(d DICTIONARY OF STRING, key STRING) RETURNS STRING
+    IF d.contains(key) THEN
+        RETURN d[key]
+    END IF
+    RETURN NULL
+END FUNCTION
+
+#+ Percent-decode a URL component: "%XX" -> byte, "+" -> space. Bytes are appended
+#+ via ASCII; multi-byte UTF-8 sequences are reconstructed byte-by-byte (adequate
+#+ for the ASCII-dominant OData query charset). An invalid escape is kept literal.
+PRIVATE FUNCTION percentDecode(s STRING) RETURNS STRING
+    DEFINE buf base.StringBuffer
+    DEFINE i, n, hi, lo, code INTEGER
+    DEFINE c STRING
+    IF s IS NULL THEN
+        RETURN NULL
+    END IF
+    LET buf = base.StringBuffer.create()
+    LET n = s.getLength()
+    LET i = 1
+    WHILE i <= n
+        LET c = s.getCharAt(i)
+        CASE
+            WHEN c == "+"
+                CALL buf.append(" ")
+            WHEN c == "%" AND i + 2 <= n
+                LET hi = hexVal(s.getCharAt(i + 1))
+                LET lo = hexVal(s.getCharAt(i + 2))
+                IF hi >= 0 AND lo >= 0 THEN
+                    LET code = hi * 16 + lo
+                    CALL buf.append(ASCII code)
+                    LET i = i + 2
+                ELSE
+                    CALL buf.append(c)
+                END IF
+            OTHERWISE
+                CALL buf.append(c)
+        END CASE
+        LET i = i + 1
+    END WHILE
+    RETURN buf.toString()
+END FUNCTION
+
+#+ Hex digit value 0-15, or -1 if not a hex digit.
+PRIVATE FUNCTION hexVal(c STRING) RETURNS INTEGER
+    CASE c
+        WHEN "0" RETURN 0
+        WHEN "1" RETURN 1
+        WHEN "2" RETURN 2
+        WHEN "3" RETURN 3
+        WHEN "4" RETURN 4
+        WHEN "5" RETURN 5
+        WHEN "6" RETURN 6
+        WHEN "7" RETURN 7
+        WHEN "8" RETURN 8
+        WHEN "9" RETURN 9
+        WHEN "a" RETURN 10
+        WHEN "A" RETURN 10
+        WHEN "b" RETURN 11
+        WHEN "B" RETURN 11
+        WHEN "c" RETURN 12
+        WHEN "C" RETURN 12
+        WHEN "d" RETURN 13
+        WHEN "D" RETURN 13
+        WHEN "e" RETURN 14
+        WHEN "E" RETURN 14
+        WHEN "f" RETURN 15
+        WHEN "F" RETURN 15
+    END CASE
+    RETURN -1
 END FUNCTION
 
 #+ Split a single OData path segment into entity-set name + the raw key

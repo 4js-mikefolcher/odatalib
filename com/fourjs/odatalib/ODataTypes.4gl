@@ -199,6 +199,34 @@ PUBLIC TYPE T_ODataResult RECORD
 END RECORD
 
 # ---------------------------------------------------------------------------
+# $batch (JSON batch, OData v4.01)
+# ---------------------------------------------------------------------------
+
+# The outcome of handling one request through the shared non-raising dispatch
+# core. For a direct GET the wrapper maps an error status to SetRestError; for a
+# batch sub-request the status + body are echoed inside the batch response.
+# body is the success payload OR the {"error":{code,message}} envelope object.
+PUBLIC TYPE T_ODataSubResponse RECORD
+    status INTEGER,
+    code STRING,
+    message STRING,
+    body util.JSONObject
+END RECORD
+
+# One sub-request of a JSON batch ("requests" array element). Extra members the
+# spec allows (headers, body, atomicityGroup) are ignored by the deserialiser.
+PUBLIC TYPE T_ODataBatchItem RECORD
+    id STRING,
+    method STRING,
+    url STRING                  # service-root-relative, e.g. "Orders?$top=2"
+END RECORD
+
+# The JSON batch request envelope: { "requests": [ … ] }.
+PUBLIC TYPE T_ODataBatchRequest RECORD
+    requests DYNAMIC ARRAY OF T_ODataBatchItem
+END RECORD
+
+# ---------------------------------------------------------------------------
 # Authorization hook
 #
 # Because the OData endpoints are generic (one operation serves every entity),
