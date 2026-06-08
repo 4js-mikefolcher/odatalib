@@ -395,12 +395,21 @@ including Power BI; the body is well-formed CSDL.
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
-- multipart/mixed `$batch`, delta/change-tracking, actions/functions; `$expand=*`, `$levels`,
+- delta/change-tracking, actions/functions; `$expand=*`, `$levels`,
   nested lambda, single-valued navigation-path comparisons, and `$apply`
   transformations beyond `filter`/`groupby`/`aggregate` (e.g. `compute`,
   `topcount`) or post-aggregation `$filter`
 - Write operations (POST/PATCH/PUT/DELETE) — read-only by design
 - OAuth2 (v1); v0 targets HTTP Basic + BDL access-control gating via `WSScope`
+
+**Platform limitation (not a roadmap item):**
+- **multipart/mixed `$batch`** (the legacy v4.0 batch format) cannot be supported
+  on the GAS REST engine. The engine has no raw-body hook (`WSBody` does not
+  exist); the only raw input, `WSAttachment`, pre-parses a `multipart/mixed`
+  request as form-data (stripping the envelope), rejects a multi-part body, and
+  cannot be an array — so the raw batch envelope is unreachable, and a custom
+  multipart response cannot be emitted either (verified by spike on GAS 6.00.01).
+  Use **JSON batch** (`application/json`, OData v4.01), which is fully supported.
 
 **Known v0 caveats:**
 - `@odata.nextLink` percent-encodes the common OData filter charset; a full
