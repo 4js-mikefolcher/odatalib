@@ -267,6 +267,31 @@ GET /Customers  -H 'X-OData-Scopes: Orders.read'     -> 403
 GET /CountrySummary                              -> 200 (public per policy)
 ```
 
+### Securing the service (read before exposing publicly)
+
+The service is **open by default** — if you never register an authorizer, every
+request is allowed. `ODataService.register()` emits a one-time startup **warning**
+to the DVM log in that case (`WARNING [odatalib]: no authorizer registered …`).
+Before any public deployment, work through this checklist:
+
+1. **Register an authorizer** (`ODataAuth.setAuthorizer` or `useScopeAuthorizer`)
+   and confirm the startup warning is gone. The hook gates entity data; restrict
+   `$metadata` / the service document at the GAS layer if they must be private.
+2. **Serve over HTTPS only.** HTTP Basic and bearer tokens are sent in headers;
+   terminate TLS at GAS or a fronting proxy and disable plain HTTP.
+3. **Keep the cost guards sane** for your data volumes — per-entity `pageSize`
+   (server cap 1000), `expandMaxRows` (default 10000), `expandMaxDepth`
+   (default 3). These bound a single request's fan-out; lower them for large
+   tables / untrusted callers.
+4. **Set GAS timeouts** (`GWS_CONNECTTIMEOUT` / `GWS_RWTIMEOUT` /
+   `GWS_SERVERTIMEOUT`, as in the example `.xcf`) so a slow/expensive query can't
+   pin a DVM indefinitely.
+5. **Least-privilege DB user.** The SQL provider only ever issues `SELECT`s
+   against the declared tables/views — grant the connection user nothing more.
+6. Values are always **bound as parameters** (never concatenated) and identifiers
+   come from the `.odata` config (not the URL), so `$filter`/`$select`/`$orderby`
+   are not injection vectors — but the points above are still yours to own.
+
 ## Building & installing
 
 The library compiles against Genero 6.x (developed with `fglcomp 6.00.01`).

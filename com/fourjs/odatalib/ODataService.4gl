@@ -47,7 +47,16 @@ PRIVATE DEFINE m_metadataFile STRING
 # ---------------------------------------------------------------------------
 
 #+ Register this module's OData endpoints under the given GAS service name.
+#+ Emits a one-time startup warning when no authorizer is registered — the
+#+ service is then OPEN (every request allowed), which is almost never what a
+#+ public deployment wants. Register an authorizer BEFORE calling register().
 PUBLIC FUNCTION register(serviceName STRING)
+    IF NOT ODataAuth.isEnabled() THEN
+        DISPLAY "WARNING [odatalib]: no authorizer registered - the OData service ",
+            "is OPEN (all requests allowed, anonymous access). Before any public ",
+            "deployment register one (ODataAuth.setAuthorizer / useScopeAuthorizer) ",
+            "and serve over HTTPS. See README 'Securing the service'."
+    END IF
     CALL com.WebServiceEngine.RegisterRestService(
         "com.fourjs.odatalib.ODataService", serviceName)
 END FUNCTION
