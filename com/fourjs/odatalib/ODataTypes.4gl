@@ -82,6 +82,8 @@ END RECORD
 PUBLIC TYPE T_ODataFilter RECORD
     property STRING,
     operator STRING,        # eq ne gt lt ge le contains startswith endswith in
+    func STRING,            # portable value fn wrapping the column on the LHS:
+                            # tolower|toupper|trim|length|round ("" = plain column)
     value STRING,           # the single literal (empty for the `in` operator)
     values DYNAMIC ARRAY OF STRING,  # the value list for the `in` operator
     isNull BOOLEAN,         # TRUE when the literal was the bare keyword null

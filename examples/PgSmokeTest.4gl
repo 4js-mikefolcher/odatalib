@@ -80,6 +80,24 @@ MAIN
     DISPLAY "\n== CountrySummary?$count=true  (function provider) =="
     CALL showCollection(ent, NULL, NULL, "5", NULL, "true", NULL)
 
+    # --- $filter value functions (portable set) -------------------------------
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    DISPLAY "\n== Customers?$filter=tolower(Country) eq 'germany'&$count=true  (expect 11) =="
+    CALL showCollection(ent, "CustomerID", "tolower(Country) eq 'germany'", "3", NULL, "true", NULL)
+
+    DISPLAY "\n== Customers?$filter=length(CompanyName) gt 18&$count=true  (expect 45) =="
+    CALL showCollection(ent, "CustomerID", "length(CompanyName) gt 18", "3", NULL, "true", NULL)
+
+    CALL ODataConfig.findEntity("Orders") RETURNING ent.*, found
+    DISPLAY "\n== Orders?$filter=round(Freight) eq 32&$count=true  (expect 11) =="
+    CALL showCollection(ent, "OrderID", "round(Freight) eq 32", "3", NULL, "true", NULL)
+
+    DISPLAY "\n== Orders?$filter=year(OrderDate) eq 1997  (deferred, expect 501) =="
+    CALL showCollection(ent, "OrderID", "year(OrderDate) eq 1997", NULL, NULL, NULL, NULL)
+
+    DISPLAY "\n== Orders?$filter=Freight add 1 gt 2  (arithmetic, expect 501) =="
+    CALL showCollection(ent, "OrderID", "Freight add 1 gt 2", NULL, NULL, NULL, NULL)
+
     # --- richer $expand: nested options ---------------------------------------
     CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
     DISPLAY "\n== Customers(ALFKI) $expand=Orders($orderby=OrderDate desc;$top=3;$select=OrderID)  (expect 11103,11011,10952) =="

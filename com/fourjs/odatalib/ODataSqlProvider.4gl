@@ -797,7 +797,7 @@ END FUNCTION
 # Sets m_whereErr on an unknown property / unsupported operator / bad literal.
 PRIVATE FUNCTION appendPredicate(
     entity ODataTypes.T_ODataEntity, flt ODataTypes.T_ODataFilter)
-    DEFINE col, sqlOp, boundVal, bindType, vmsg STRING
+    DEFINE col, sqlOp, boundVal, bindType, vmsg, funcType STRING
     DEFINE prop ODataTypes.T_ODataProperty
     DEFINE found, vok, isLike BOOLEAN
     DEFINE n INTEGER
@@ -813,6 +813,33 @@ PRIVATE FUNCTION appendPredicate(
     END IF
     # Qualify with the active subquery alias (empty outside a lambda subquery).
     LET col = SFMT("%1%2", m_colPrefix, col)
+
+    # Portable value function on the LHS (tolower/toupper/trim/length/round): wrap
+    # the column in the ANSI SQL function and bind the literal against the
+    # function's RESULT type (e.g. length -> integer) rather than the column type.
+    LET funcType = NULL
+    IF flt.func IS NOT NULL AND flt.func.getLength() > 0 THEN
+        CASE flt.func
+            WHEN "tolower"
+                LET col = SFMT("LOWER(%1)", col)
+                LET funcType = "Edm.String"
+            WHEN "toupper"
+                LET col = SFMT("UPPER(%1)", col)
+                LET funcType = "Edm.String"
+            WHEN "trim"
+                LET col = SFMT("TRIM(%1)", col)
+                LET funcType = "Edm.String"
+            WHEN "length"
+                LET col = SFMT("LENGTH(%1)", col)
+                LET funcType = "Edm.Int32"
+            WHEN "round"
+                LET col = SFMT("ROUND(%1)", col)
+                LET funcType = "Edm.Decimal"
+            OTHERWISE
+                LET m_whereErr = SFMT("Unsupported $filter function '%1'", flt.func)
+                RETURN
+        END CASE
+    END IF
 
     IF flt.isNull THEN
         # The OData null literal maps to SQL IS [NOT] NULL with no bound
@@ -841,7 +868,12 @@ PRIVATE FUNCTION appendPredicate(
     # correctly-typed SQL parameter; LIKE patterns are always textual. For the
     # string functions the user value is wildcard-escaped (%, _, \) so it is
     # matched literally — only the framework's own %/_ act as wildcards.
-    LET bindType = prop.edmType
+    # A value function (length/round/…) binds against its RESULT type instead.
+    IF funcType IS NOT NULL THEN
+        LET bindType = funcType
+    ELSE
+        LET bindType = prop.edmType
+    END IF
     LET isLike = FALSE
     CASE flt.operator
         WHEN "eq" LET sqlOp = "="

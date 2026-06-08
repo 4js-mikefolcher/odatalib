@@ -61,7 +61,15 @@ inspects the captured segment for a `(key)` suffix. (GAS REST cannot express a
   correct `not` > `and` > `or` precedence; `eq null` / `ne null` map to SQL
   `IS NULL` / `IS NOT NULL`. Lambda operators on collection navigation properties:
   `nav/any(v: P)`, `nav/all(v: P)`, and `nav/any()` (existence) — compiled to a
-  correlated `EXISTS` / `NOT EXISTS` subquery (SQL providers; single-pair joins)
+  correlated `EXISTS` / `NOT EXISTS` subquery (SQL providers; single-pair joins).
+  Value functions on the compared property: `tolower`, `toupper`, `trim`,
+  `length`, `round` (the portable set; date-part / `floor` / `ceiling` / multi-arg
+  / arithmetic return `501`)
+- `$count` path — `GET /{set}/$count` returns the bare match count as `text/plain`
+  (honours `$filter`)
+- Navigation traversal — `GET /{set}({key})/{navProp}` returns the related set
+  (to-many → collection, to-one → single entity), with the full query-option set
+  applied to the related result
 - `$select` — property projection
 - `$top`, `$skip` — pagination
 - `$orderby` — multi-term, `asc` / `desc`
@@ -432,6 +440,14 @@ All clients we tested (Power BI, JSON/HTTP clients) interoperate without it.
   RFC 3986 encoder is a follow-up.
 
 **Recently closed (verified against PostgreSQL Northwind):**
+- *Client-compat surface.* (1) `$filter` value functions `tolower`/`toupper`/
+  `trim`/`length`/`round` (mapped to ANSI `LOWER`/`UPPER`/`TRIM`/`LENGTH`/`ROUND`,
+  bound by the function's result type; date-part/`floor`/`ceiling`/multi-arg/
+  arithmetic → `501` pending a dialect layer). (2) `GET /{set}/$count` → bare count
+  as `text/plain`. (3) `GET /{set}({key})/{navProp}` navigation traversal (to-many
+  collection / to-one entity) with the full query-option set. The two new
+  two-segment routes don't shadow the existing ones (literal `/$count` wins over
+  the `{navProp}` placeholder — verified on live GAS).
 - *CSDL navigation bindings.* `$metadata` now emits a `<NavigationPropertyBinding>`
   inside each `<EntitySet>` (one per declared relationship), so OData clients
   (Power BI / Excel / Tableau) can resolve which entity set a navigation property

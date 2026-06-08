@@ -775,6 +775,49 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
         RETURN addPred(f)
     END IF
 
+    # value-function form: FUNC ( property ) compOp literal  (portable set only).
+    # Deferred functions (date parts, floor/ceiling, multi-arg) are recognised but
+    # unsupported -> 501. Detected by a function-name token followed by '('.
+    IF m_tpos + 1 <= m_tokens.getLength() AND m_tokens[m_tpos + 1] == "(" THEN
+        IF isDeferredFunc(fn) THEN
+            LET m_pcode = "NotImplemented"
+            LET m_perr =
+                SFMT("The $filter function '%1' is not supported", fn)
+            RETURN 0
+        END IF
+        IF isPortableFunc(fn) THEN
+            IF m_tpos + 5 > m_tokens.getLength()
+                OR m_tokens[m_tpos + 3] != ")" THEN
+                LET m_perr = SFMT("Malformed '%1(...)' in $filter", fn)
+                RETURN 0
+            END IF
+            LET f.func = fn
+            LET f.property = normProperty(m_tokens[m_tpos + 2])
+            IF m_perr IS NOT NULL THEN RETURN 0 END IF
+            LET op = m_tokens[m_tpos + 4].toLowerCase()
+            CASE op
+                WHEN "eq"
+                WHEN "ne"
+                WHEN "gt"
+                WHEN "lt"
+                WHEN "ge"
+                WHEN "le"
+                OTHERWISE
+                    LET m_perr =
+                        SFMT("Unsupported operator '%1' after %2()", op, fn)
+                    RETURN 0
+            END CASE
+            LET f.operator = op
+            LET rawLit = m_tokens[m_tpos + 5]
+            IF rawLit.getCharAt(1) != "'" AND rawLit.toLowerCase() == "null" THEN
+                LET f.isNull = TRUE
+            END IF
+            LET f.value = stripQuotes(rawLit)
+            LET m_tpos = m_tpos + 6
+            RETURN addPred(f)
+        END IF
+    END IF
+
     # comparison form: property compOp literal
     IF m_tpos + 2 > m_tokens.getLength() THEN
         LET m_perr = "Incomplete comparison in $filter"
@@ -806,6 +849,20 @@ PRIVATE FUNCTION parsePredicate() RETURNS INTEGER
         END IF
         LET m_tpos = pp + 1
         RETURN addPred(f)
+    END IF
+
+    # Arithmetic operators are recognised but unsupported (need an expression
+    # model / dialect layer) -> 501 rather than a misleading BadRequest.
+    CASE op
+        WHEN "add" LET m_pcode = "NotImplemented"
+        WHEN "sub" LET m_pcode = "NotImplemented"
+        WHEN "mul" LET m_pcode = "NotImplemented"
+        WHEN "div" LET m_pcode = "NotImplemented"
+        WHEN "mod" LET m_pcode = "NotImplemented"
+    END CASE
+    IF m_pcode == "NotImplemented" THEN
+        LET m_perr = SFMT("Arithmetic operator '%1' in $filter is not supported", op)
+        RETURN 0
     END IF
 
     CASE op
@@ -985,6 +1042,41 @@ PRIVATE FUNCTION normProperty(prop STRING) RETURNS STRING
         END IF
     END IF
     RETURN prop
+END FUNCTION
+
+#+ TRUE for the portable unary $filter value functions (mapped to ANSI SQL that
+#+ works across PostgreSQL / Informix / SQLite by ODataSqlProvider).
+PRIVATE FUNCTION isPortableFunc(name STRING) RETURNS BOOLEAN
+    CASE name
+        WHEN "tolower" RETURN TRUE
+        WHEN "toupper" RETURN TRUE
+        WHEN "trim" RETURN TRUE
+        WHEN "length" RETURN TRUE
+        WHEN "round" RETURN TRUE
+    END CASE
+    RETURN FALSE
+END FUNCTION
+
+#+ TRUE for recognised-but-unsupported $filter functions: they need engine-
+#+ specific SQL (date parts, floor/ceiling) or an expression model (multi-arg
+#+ string functions). The parser answers 501 for these rather than mis-parsing.
+PRIVATE FUNCTION isDeferredFunc(name STRING) RETURNS BOOLEAN
+    CASE name
+        WHEN "year" RETURN TRUE
+        WHEN "month" RETURN TRUE
+        WHEN "day" RETURN TRUE
+        WHEN "hour" RETURN TRUE
+        WHEN "minute" RETURN TRUE
+        WHEN "second" RETURN TRUE
+        WHEN "date" RETURN TRUE
+        WHEN "time" RETURN TRUE
+        WHEN "floor" RETURN TRUE
+        WHEN "ceiling" RETURN TRUE
+        WHEN "substring" RETURN TRUE
+        WHEN "indexof" RETURN TRUE
+        WHEN "concat" RETURN TRUE
+    END CASE
+    RETURN FALSE
 END FUNCTION
 
 # ---------------------------------------------------------------------------

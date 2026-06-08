@@ -174,6 +174,77 @@ PUBLIC FUNCTION getEntitySet(
     RETURN sub.body
 END FUNCTION
 
+#+ `/{entitySet}/$count` — the bare match count as text/plain (e.g. "856"),
+#+ honouring $filter. Distinct from the $count=true collection annotation.
+PUBLIC FUNCTION getEntityCount(
+    entitySet STRING ATTRIBUTES(WSParam),
+    pFilter STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$filter"),
+    hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
+    hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
+    ATTRIBUTES(WSGet,
+        WSPath = "/{entitySet}/$count",
+        WSDescription = "OData entity count")
+    RETURNS STRING ATTRIBUTES(WSMedia = "text/plain")
+    DEFINE name, keyVal STRING
+    DEFINE isKeyReq BOOLEAN
+    DEFINE sub ODataTypes.T_ODataSubResponse
+
+    CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
+    IF isKeyReq THEN
+        CALL ODataError.raiseCode("BadRequest",
+            "$count applies to a collection, not a single entity")
+        RETURN NULL
+    END IF
+    # Reuse the shared core: a count-only fetch (top=0, $count=true) — gives auth,
+    # entity resolution and the filtered count, returned as the @odata.count value.
+    CALL dispatchGet(name, NULL, FALSE,
+            NULL, pFilter, "0", NULL, "true", NULL, NULL, NULL,
+            hScopes, hUser, serviceBaseUrl())
+        RETURNING sub.*
+    IF sub.status >= 400 THEN
+        CALL ODataError.raise(sub.status, sub.code, sub.message)
+        RETURN NULL
+    END IF
+    # get() pads a JSON NUMBER with a trailing ".0"; $count must be a bare integer.
+    RETURN stripDotZero(sub.body.get("@odata.count"))
+END FUNCTION
+
+#+ `/{entitySet}({key})/{navProp}` — navigation traversal: the related set
+#+ (to-many → collection, to-one → single entity), with the full query-option
+#+ set applied to the related result.
+PUBLIC FUNCTION getNavigation(
+    entitySet STRING ATTRIBUTES(WSParam),
+    navProp STRING ATTRIBUTES(WSParam),
+    pSelect STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$select"),
+    pFilter STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$filter"),
+    pTop STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$top"),
+    pSkip STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$skip"),
+    pCount STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$count"),
+    pOrderby STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$orderby"),
+    pExpand STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$expand"),
+    pApply STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$apply"),
+    hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
+    hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
+    ATTRIBUTES(WSGet,
+        WSPath = "/{entitySet}/{navProp}",
+        WSDescription = "OData navigation property traversal")
+    RETURNS util.JSONObject ATTRIBUTES(WSMedia = "application/json")
+    DEFINE name, keyVal STRING
+    DEFINE isKeyReq BOOLEAN
+    DEFINE sub ODataTypes.T_ODataSubResponse
+
+    CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
+    CALL dispatchNavigation(name, keyVal, isKeyReq, navProp,
+            pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply,
+            hScopes, hUser, serviceBaseUrl())
+        RETURNING sub.*
+    IF sub.status >= 400 THEN
+        CALL ODataError.raise(sub.status, sub.code, sub.message)
+        RETURN NULL
+    END IF
+    RETURN sub.body
+END FUNCTION
+
 # ---------------------------------------------------------------------------
 # Shared request core (non-raising) — used by the direct GET and by $batch
 # ---------------------------------------------------------------------------
@@ -326,6 +397,158 @@ END FUNCTION
 PRIVATE FUNCTION subErrCode(code STRING, message STRING)
     RETURNS ODataTypes.T_ODataSubResponse
     RETURN subErr(ODataError.httpStatusFor(code), code, message)
+END FUNCTION
+
+#+ Navigation traversal core: resolve the parent key's join value, then read the
+#+ related set on the target with a synthesized "toProp eq <value>" filter AND-ed
+#+ with the client's options. to-many -> collection; to-one -> single entity.
+PRIVATE FUNCTION dispatchNavigation(
+    parentName STRING, keyVal STRING, isKeyReq BOOLEAN, navProp STRING,
+    pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
+    pOrderby STRING, pExpand STRING, pApply STRING,
+    hScopes STRING, hUser STRING, baseUrl STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE parentEnt, tgt ODataTypes.T_ODataEntity
+    DEFINE nav ODataTypes.T_ODataNavigation
+    DEFINE authCtx ODataTypes.T_ODataAuthContext
+    DEFINE authRes ODataTypes.T_ODataAuthResult
+    DEFINE found BOOLEAN
+    DEFINE keyParts DYNAMIC ARRAY OF ODataTypes.T_ODataKeyPart
+    DEFINE pres ODataTypes.T_ODataResult
+    DEFINE prow, entObj util.JSONObject
+    DEFINE arr util.JSONArray
+    DEFINE lit, combined STRING
+    DEFINE sub ODataTypes.T_ODataSubResponse
+
+    IF NOT isKeyReq THEN
+        RETURN subErrCode("BadRequest",
+            SFMT("Navigation '%1' requires a key, e.g. %2(<key>)/%1",
+                navProp, parentName))
+    END IF
+
+    # Authorise the parent entity (the target is authorised by dispatchGet below).
+    LET authCtx = buildAuthContext(parentName, "read", keyVal, hScopes, hUser)
+    LET authRes = ODataAuth.authorize(authCtx)
+    IF NOT authRes.allowed THEN
+        IF authRes.status == 401 THEN
+            RETURN subErr(401, "Unauthorized",
+                NVL(authRes.message, "Authentication required"))
+        END IF
+        RETURN subErr(403, "Forbidden", NVL(authRes.message, "Access denied"))
+    END IF
+
+    CALL ODataConfig.findEntity(parentName) RETURNING parentEnt.*, found
+    IF NOT found THEN
+        RETURN subErrCode("NotFound",
+            SFMT("Entity set '%1' not found", parentName))
+    END IF
+    CALL ODataConfig.findNavigation(parentEnt, navProp) RETURNING nav.*, found
+    IF NOT found THEN
+        RETURN subErrCode("NotFound",
+            SFMT("'%1' has no navigation property '%2'", parentName, navProp))
+    END IF
+    IF nav.on.getLength() != 1 THEN
+        RETURN subErrCode("NotImplemented",
+            SFMT("Composite-key navigation '%1' is not supported", navProp))
+    END IF
+    CALL ODataConfig.findEntity(nav.target) RETURNING tgt.*, found
+    IF NOT found THEN
+        RETURN subErrCode("InternalError",
+            SFMT("Navigation target '%1' is not a declared entity", nav.target))
+    END IF
+
+    # Read the parent row to obtain the local join-key value.
+    CALL parseKeyPredicate(keyVal) RETURNING keyParts
+    LET pres = ODataProvider.fetchByKeys(parentEnt, keyParts)
+    IF NOT pres.ok THEN
+        RETURN subErrCode(pres.errorCode, pres.errorMessage)
+    END IF
+    IF pres.rows.getLength() == 0 THEN
+        RETURN subErrCode("NotFound",
+            SFMT("No %1 with key '%2'", parentName, keyVal))
+    END IF
+    LET prow = pres.rows.get(1)
+
+    LET lit = litForValue(tgt, nav.on[1].toProp, prow.get(nav.on[1].fromProp))
+    LET combined = SFMT("%1 eq %2", nav.on[1].toProp, lit)
+    IF pFilter IS NOT NULL AND pFilter.getLength() > 0 THEN
+        LET combined = SFMT("(%1) and (%2)", combined, pFilter)
+    END IF
+
+    # Read the related set on the target (dispatchGet auths the target + applies
+    # all the client's query options on top of the navigation constraint).
+    CALL dispatchGet(nav.target, NULL, FALSE,
+            pSelect, combined, pTop, pSkip, pCount, pOrderby, pExpand, pApply,
+            hScopes, hUser, baseUrl)
+        RETURNING sub.*
+    IF sub.status >= 400 THEN
+        RETURN sub
+    END IF
+    IF nav.kind == "many" THEN
+        RETURN sub                          # collection envelope (#target)
+    END IF
+
+    # to-one: reshape the (<=1 row) collection into a single entity (#target/$entity).
+    LET arr = sub.body.get("value")
+    IF arr IS NULL OR arr.getLength() == 0 THEN
+        RETURN subErrCode("NotFound",
+            SFMT("No related %1 for %2('%3')", navProp, parentName, keyVal))
+    END IF
+    LET entObj = arr.get(1)
+    CALL entObj.put("@odata.context",
+        SFMT("%1/$metadata#%2/$entity", baseUrl, nav.target))
+    RETURN subOk(entObj)
+END FUNCTION
+
+#+ Format a parent join value as an OData literal for the synthesized "eq"
+#+ filter, by the target join property's type: string/guid -> quoted (with ''
+#+ escaping); integer -> trailing ".0" (JSON number padding) stripped; other
+#+ numeric/date -> the trimmed value; NULL -> the null literal.
+PRIVATE FUNCTION litForValue(
+    tgt ODataTypes.T_ODataEntity, propName STRING, rawVal STRING)
+    RETURNS STRING
+    DEFINE prop ODataTypes.T_ODataProperty
+    DEFINE found BOOLEAN
+    DEFINE v STRING
+    IF rawVal IS NULL THEN
+        RETURN "null"
+    END IF
+    LET v = rawVal.trim()
+    CALL ODataConfig.findProperty(tgt, propName) RETURNING prop.*, found
+    CASE prop.edmType
+        WHEN "Edm.String"
+            RETURN SFMT("'%1'", v.replaceAll("'", "''"))
+        WHEN "Edm.Guid"
+            RETURN SFMT("'%1'", v.replaceAll("'", "''"))
+        WHEN "Edm.Int16" RETURN stripDotZero(v)
+        WHEN "Edm.Int32" RETURN stripDotZero(v)
+        WHEN "Edm.Int64" RETURN stripDotZero(v)
+        WHEN "Edm.Byte" RETURN stripDotZero(v)
+        WHEN "Edm.SByte" RETURN stripDotZero(v)
+    END CASE
+    RETURN v
+END FUNCTION
+
+#+ Strip a trailing ".0…0" that util.JSONObject.get() pads onto whole NUMBERs,
+#+ so an integer join key reads as "10248", not "10248.0".
+PRIVATE FUNCTION stripDotZero(v STRING) RETURNS STRING
+    DEFINE dot, i INTEGER
+    DEFINE allZero BOOLEAN
+    LET dot = v.getIndexOf(".", 1)
+    IF dot <= 0 THEN
+        RETURN v
+    END IF
+    LET allZero = TRUE
+    FOR i = dot + 1 TO v.getLength()
+        IF v.getCharAt(i) != "0" THEN
+            LET allZero = FALSE
+            EXIT FOR
+        END IF
+    END FOR
+    IF allZero THEN
+        RETURN v.subString(1, dot - 1)
+    END IF
+    RETURN v
 END FUNCTION
 
 # ---------------------------------------------------------------------------
