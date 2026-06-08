@@ -90,12 +90,25 @@ PUBLIC FUNCTION buildMetadata() RETURNS STRING
         CALL buf.append("   </EntityType>\n")
     END FOR
 
-    # Entity container
+    # Entity container. Each <EntitySet> carries a <NavigationPropertyBinding>
+    # per declared relationship so clients (Power BI / Excel / Tableau) can
+    # resolve which entity set a navigation property targets.
     CALL buf.append('   <EntityContainer Name="Container">\n')
     FOR i = 1 TO ODataConfig.getEntityCount()
         LET ent = ODataConfig.getEntityAt(i)
-        CALL buf.append(SFMT('    <EntitySet Name="%1" EntityType="%2.%3"/>\n',
-            ent.name, ns, ent.entityType))
+        IF ent.navigation.getLength() == 0 THEN
+            CALL buf.append(SFMT('    <EntitySet Name="%1" EntityType="%2.%3"/>\n',
+                ent.name, ns, ent.entityType))
+        ELSE
+            CALL buf.append(SFMT('    <EntitySet Name="%1" EntityType="%2.%3">\n',
+                ent.name, ns, ent.entityType))
+            FOR j = 1 TO ent.navigation.getLength()
+                CALL buf.append(SFMT(
+                    '     <NavigationPropertyBinding Path="%1" Target="%2"/>\n',
+                    ent.navigation[j].name, ent.navigation[j].target))
+            END FOR
+            CALL buf.append("    </EntitySet>\n")
+        END IF
     END FOR
     CALL buf.append("   </EntityContainer>\n")
 

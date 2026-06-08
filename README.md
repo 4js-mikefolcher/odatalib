@@ -392,6 +392,22 @@ wrapper) with `Content-Type: text/xml`, derived from the file extension.
 `text/xml` is a valid XML media type (RFC 7303) accepted by OData clients
 including Power BI; the body is well-formed CSDL.
 
+**Note on the `OData-Version` header:** the OData spec *recommends* (SHOULD, not
+MUST) that responses carry `OData-Version: 4.0`. The GAS REST engine does not
+expose response-header control to a `RegisterRestService` handler (there is no
+`WSBody`/output-header binding, and the `WSContext` dictionary is request-only),
+so the library cannot emit it from BDL. If a strict client requires it, inject it
+at the **GAS level** with an `<HTTP>` header rule in the dispatcher configuration
+(schema `header-type` in `cfcommon.xsd`):
+
+```xml
+<HTTP>
+  <SERVICE><HEADER Name="OData-Version">4.0</HEADER></SERVICE>
+</HTTP>
+```
+
+All clients we tested (Power BI, JSON/HTTP clients) interoperate without it.
+
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
@@ -416,6 +432,11 @@ including Power BI; the body is well-formed CSDL.
   RFC 3986 encoder is a follow-up.
 
 **Recently closed (verified against PostgreSQL Northwind):**
+- *CSDL navigation bindings.* `$metadata` now emits a `<NavigationPropertyBinding>`
+  inside each `<EntitySet>` (one per declared relationship), so OData clients
+  (Power BI / Excel / Tableau) can resolve which entity set a navigation property
+  targets and build their relationship model — not just the `<NavigationProperty>`
+  type declarations.
 - *Type-aware filter binding.* `$filter` and key-predicate values are now bound
   with the program-variable type implied by the property's `Edm.*` type
   (`Edm.Int16/32/64`, `Edm.Single/Double/Decimal`, `Edm.Date`), so numeric and
