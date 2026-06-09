@@ -1,6 +1,6 @@
 {
   "name": "odatalib",
-  "version": "0.8.0",
+  "version": "1.0.0",
   "description": "Genero BDL library for exposing read-only OData v4 services over GAS REST. Hybrid pluggable providers (SQL / BDL function), .odata config-driven schema.",
   "author": "michael.folcher@4js.com",
   "license": "Apache-2.0",
