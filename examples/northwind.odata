@@ -13,6 +13,9 @@
         { "name": "CustomerID",  "column": "customer_id",  "type": "Edm.String", "key": true },
         { "name": "CompanyName", "column": "company_name", "type": "Edm.String" },
         { "name": "Country",     "column": "country",      "type": "Edm.String" }
+      ],
+      "navigation": [
+        { "name": "Orders", "target": "Orders", "kind": "many", "on": [{ "from": "CustomerID", "to": "CustomerID" }] }
       ]
     },
     {
@@ -26,6 +29,9 @@
         { "name": "OrderID",    "column": "order_id",    "type": "Edm.Int32",   "key": true },
         { "name": "CustomerID", "column": "customer_id", "type": "Edm.String" },
         { "name": "Freight",    "column": "freight",     "type": "Edm.Decimal" }
+      ],
+      "navigation": [
+        { "name": "Customer", "target": "Customers", "kind": "one", "on": [{ "from": "CustomerID", "to": "CustomerID" }] }
       ]
     },
     {

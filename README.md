@@ -314,6 +314,26 @@ fglpkg publish          # publish the library
 fglpkg install odatalib # consume it in an application
 ```
 
+## Tests
+
+`make test` runs the assert-based regression suite ([`tests/odata_test.4gl`](tests/odata_test.4gl))
+against an **in-memory SQLite** database — no external server, just the Genero
+toolchain — covering the query pipeline end to end: `$filter` (incl. the value
+functions, `in`, `null`, `contains`), `$select`/`$top`/`$skip`/`$orderby`/`$count`,
+key lookup, `$expand`, lambda `any`, `$apply`, the function provider, CSDL
+metadata, and the error paths. It exits non-zero on any failure.
+
+```bash
+make test     # compile the library + run the suite
+make clean    # remove .42m
+```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `make test`;
+because the Genero toolchain is licensed and not on GitHub-hosted runners, it
+targets a **self-hosted runner** labelled `genero` (FGLDIR set, `fglcomp`/`fglrun`
+on `PATH`). The richer PostgreSQL suite, [`examples/PgSmokeTest.4gl`](examples/PgSmokeTest.4gl),
+is run manually against a live Northwind database (see its header).
+
 ## Running the example
 
 A small in-memory (SQLite) Northwind sample lives in `examples/`.

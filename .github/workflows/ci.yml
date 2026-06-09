@@ -1,0 +1,23 @@
+name: CI
+
+# odatalib compiles and tests with the Genero toolchain (fglcomp/fglrun), which
+# is licensed and NOT available on GitHub-hosted runners. Run this on a
+# self-hosted runner that has Genero installed (FGLDIR set, fglcomp/fglrun on
+# PATH) — label it `genero`. The regression suite uses an in-memory SQLite
+# database, so no external database server is required.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: [self-hosted, genero]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain version
+        run: fglrun --version
+      - name: Compile + run regression suite
+        run: make test

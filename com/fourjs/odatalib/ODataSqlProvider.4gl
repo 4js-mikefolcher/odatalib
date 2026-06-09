@@ -834,7 +834,10 @@ PRIVATE FUNCTION appendPredicate(
                 LET funcType = "Edm.Int32"
             WHEN "round"
                 LET col = SFMT("ROUND(%1)", col)
-                LET funcType = "Edm.Decimal"
+                # ROUND yields a floating value; bind the comparison value as a
+                # float so it coerces against the result on every engine (a bound
+                # DECIMAL fails SQLite's affinity check against REAL).
+                LET funcType = "Edm.Double"
             OTHERWISE
                 LET m_whereErr = SFMT("Unsupported $filter function '%1'", flt.func)
                 RETURN
