@@ -725,8 +725,12 @@ PRIVATE FUNCTION appendLambda(
         RETURN
     END IF
 
+    # Alias must start with a letter: Oracle rejects identifiers beginning with
+    # an underscore (ORA-00911), though Postgres/MariaDB/SQLite accept them. The
+    # "odl" prefix (odatalib lambda) keeps collisions with real table aliases
+    # unlikely while staying portable across engines.
     LET m_lambdaAlias = m_lambdaAlias + 1
-    LET alias = SFMT("_l%1", m_lambdaAlias)
+    LET alias = SFMT("odl%1", m_lambdaAlias)
     LET savedPrefix = m_colPrefix
 
     CASE quant

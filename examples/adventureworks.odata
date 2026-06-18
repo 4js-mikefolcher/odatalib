@@ -1,0 +1,104 @@
+{
+  "service": "adventureworks",
+  "namespace": "AdventureWorks",
+  "expandMaxRows": 50000,
+  "entities": [
+    {
+      "name": "SalesOrders",
+      "entityType": "SalesOrder",
+      "provider": "sql",
+      "source": "salesorderheader",
+      "key": "SalesOrderID",
+      "pageSize": 100,
+      "properties": [
+        { "name": "SalesOrderID",  "column": "salesorderid",  "type": "Edm.Int32", "key": true },
+        { "name": "CustomerID",    "column": "customerid",     "type": "Edm.Int32" },
+        { "name": "SalesPersonID", "column": "salespersonid",  "type": "Edm.Int32" },
+        { "name": "TerritoryID",   "column": "territoryid",    "type": "Edm.Int32" },
+        { "name": "Status",        "column": "status",         "type": "Edm.Int16" },
+        { "name": "OrderDate",     "column": "orderdate",      "type": "Edm.Date" },
+        { "name": "SubTotal",      "column": "subtotal",       "type": "Edm.Decimal" },
+        { "name": "TaxAmt",        "column": "taxamt",         "type": "Edm.Decimal" },
+        { "name": "Freight",       "column": "freight",        "type": "Edm.Decimal" }
+      ],
+      "navigation": [
+        { "name": "Customer", "target": "Customers",         "kind": "one",  "on": [{ "from": "CustomerID", "to": "CustomerID" }] },
+        { "name": "Details",  "target": "SalesOrderDetails", "kind": "many", "on": [{ "from": "SalesOrderID", "to": "SalesOrderID" }] }
+      ]
+    },
+    {
+      "name": "SalesOrderDetails",
+      "entityType": "SalesOrderDetail",
+      "provider": "sql",
+      "source": "salesorderdetail",
+      "pageSize": 100,
+      "properties": [
+        { "name": "SalesOrderID",       "column": "salesorderid",       "type": "Edm.Int32",   "key": true },
+        { "name": "SalesOrderDetailID", "column": "salesorderdetailid", "type": "Edm.Int32",   "key": true },
+        { "name": "ProductID",          "column": "productid",          "type": "Edm.Int32" },
+        { "name": "OrderQty",           "column": "orderqty",           "type": "Edm.Int16" },
+        { "name": "UnitPrice",          "column": "unitprice",          "type": "Edm.Decimal" },
+        { "name": "UnitPriceDiscount",  "column": "unitpricediscount",  "type": "Edm.Decimal" }
+      ],
+      "navigation": [
+        { "name": "Order",   "target": "SalesOrders", "kind": "one", "on": [{ "from": "SalesOrderID", "to": "SalesOrderID" }] },
+        { "name": "Product", "target": "Products",    "kind": "one", "on": [{ "from": "ProductID", "to": "ProductID" }] }
+      ]
+    },
+    {
+      "name": "Products",
+      "entityType": "Product",
+      "provider": "sql",
+      "source": "product",
+      "key": "ProductID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "ProductID",            "column": "productid",            "type": "Edm.Int32", "key": true },
+        { "name": "Name",                 "column": "name",                 "type": "Edm.String" },
+        { "name": "ProductNumber",        "column": "productnumber",        "type": "Edm.String" },
+        { "name": "Color",                "column": "color",                "type": "Edm.String" },
+        { "name": "StandardCost",         "column": "standardcost",         "type": "Edm.Decimal" },
+        { "name": "ListPrice",            "column": "listprice",            "type": "Edm.Decimal" },
+        { "name": "ProductSubcategoryID", "column": "productsubcategoryid", "type": "Edm.Int32" }
+      ],
+      "navigation": [
+        { "name": "Details", "target": "SalesOrderDetails", "kind": "many", "on": [{ "from": "ProductID", "to": "ProductID" }] }
+      ]
+    },
+    {
+      "name": "Customers",
+      "entityType": "Customer",
+      "provider": "sql",
+      "source": "customer",
+      "key": "CustomerID",
+      "pageSize": 100,
+      "properties": [
+        { "name": "CustomerID",  "column": "customerid",  "type": "Edm.Int32", "key": true },
+        { "name": "PersonID",    "column": "personid",    "type": "Edm.Int32" },
+        { "name": "StoreID",     "column": "storeid",     "type": "Edm.Int32" },
+        { "name": "TerritoryID", "column": "territoryid", "type": "Edm.Int32" }
+      ],
+      "navigation": [
+        { "name": "Orders",    "target": "SalesOrders",     "kind": "many", "on": [{ "from": "CustomerID", "to": "CustomerID" }] },
+        { "name": "Territory", "target": "SalesTerritories", "kind": "one",  "on": [{ "from": "TerritoryID", "to": "TerritoryID" }] }
+      ]
+    },
+    {
+      "name": "SalesTerritories",
+      "entityType": "SalesTerritory",
+      "provider": "sql",
+      "source": "salesterritory",
+      "key": "TerritoryID",
+      "pageSize": 50,
+      "properties": [
+        { "name": "TerritoryID",       "column": "territoryid",       "type": "Edm.Int32", "key": true },
+        { "name": "Name",              "column": "name",              "type": "Edm.String" },
+        { "name": "CountryRegionCode", "column": "countryregioncode", "type": "Edm.String" },
+        { "name": "SalesYTD",          "column": "salesytd",          "type": "Edm.Decimal" }
+      ],
+      "navigation": [
+        { "name": "Customers", "target": "Customers", "kind": "many", "on": [{ "from": "TerritoryID", "to": "TerritoryID" }] }
+      ]
+    }
+  ]
+}
