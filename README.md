@@ -334,6 +334,34 @@ targets a **self-hosted runner** labelled `genero` (FGLDIR set, `fglcomp`/`fglru
 on `PATH`). The richer PostgreSQL suite, [`examples/PgSmokeTest.4gl`](examples/PgSmokeTest.4gl),
 is run manually against a live Northwind database (see its header).
 
+### Cross-engine portability suite
+
+[`tests/portability_test.4gl`](tests/portability_test.4gl) runs the full OData
+surface against a **live** database server and has been verified across
+**Oracle**, **MariaDB**, and **PostgreSQL** on two schemas — Northwind and
+[AdventureWorks](examples/adventureworks.odata). It is driven by environment
+variables so one binary covers every (engine, schema) combination:
+
+| Var | Meaning |
+|-----|---------|
+| `ODATA_TEST_CONFIG` | the `.odata` config to load (e.g. `adventureworks.odata`) |
+| `ODATA_DB` | the database name to `CONNECT TO` |
+| `ODATA_SCHEMA` | `aw` (AdventureWorks, exact-count asserts) or `nw` (Northwind, relational / known-fact asserts) |
+
+```bash
+# AdventureWorks on Oracle (FGLPROFILE selects the engine/driver)
+FGLPROFILE=/path/to/fglprofile.ora \
+  ODATA_DB=adventureworks ODATA_CONFIG=adventureworks.odata ODATA_SCHEMA=aw \
+  make test-portability
+```
+
+AdventureWorks data is identical across the three engines, so its checks are
+exact counts; Northwind totals differ per engine (and a live copy may be mutated
+by an application), so its checks are relational, known-row, and query-equivalence
+properties that hold regardless of the row totals. All generated SQL uses
+unquoted lowercase identifiers, scroll-cursor paging (no dialect `LIMIT`/`OFFSET`),
+and letter-led subquery aliases, so it is portable across these engines.
+
 ## Running the example
 
 A small in-memory (SQLite) Northwind sample lives in `examples/`.
