@@ -17,6 +17,7 @@ IMPORT FGL com.fourjs.odatalib.ODataConfig
 IMPORT FGL com.fourjs.odatalib.ODataQuery
 IMPORT FGL com.fourjs.odatalib.ODataProvider
 IMPORT FGL com.fourjs.odatalib.ODataExpand
+IMPORT FGL com.fourjs.odatalib.ODataAuth
 IMPORT FGL com.fourjs.odatalib.ODataSerializer
 IMPORT FGL com.fourjs.odatalib.ODataFunctionProvider
 IMPORT FGL NorthwindCreate
@@ -52,6 +53,8 @@ MAIN
     CALL testApply()
     CALL testFunctionProvider()
     CALL testErrors()
+    CALL testExpandAuth()        # registers a global authorizer
+    CALL testFilterLambdaAuth()  # last: relies on the scope authorizer
 
     DISPLAY ""
     DISPLAY SFMT("==== odatalib tests: %1 passed, %2 failed ====", m_pass, m_fail)
@@ -176,6 +179,77 @@ FUNCTION testExpand()
     IF arr IS NOT NULL THEN
         CALL checkInt("ALFKI expanded Orders = 2", arr.getLength(), 2)
     END IF
+END FUNCTION
+
+#+ Regression for the $expand authorization-bypass issue: applyAuthorized must
+#+ gate each expand target against the request principal. A principal allowed to
+#+ read Customers but NOT Orders must not receive the expanded Orders (the nav
+#+ property is omitted); granting Orders.read restores it. Registers the built-in
+#+ scope authorizer, so it must run LAST (global authorizer state persists).
+FUNCTION testExpandAuth()
+    DEFINE q ODataTypes.T_ODataQuery
+    DEFINE r ODataTypes.T_ODataResult
+    DEFINE ent ODataTypes.T_ODataEntity
+    DEFINE obj util.JSONObject
+    DEFINE ctx ODataTypes.T_ODataAuthContext
+    DEFINE found, eok BOOLEAN
+    DEFINE ecode, emsg STRING
+
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    CALL ODataAuth.configureScopes("", ".")
+    CALL ODataAuth.useScopeAuthorizer()
+    LET ctx.token = "test-token"
+
+    # Denied target: scope grants Customers.read only -> Orders expansion omitted.
+    LET r = ODataProvider.fetchByKey(ent, "ALFKI")
+    LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, "Orders", NULL)
+    LET ctx.scope = "Customers.read"
+    CALL ODataExpand.applyAuthorized(ent, q, r.rows, ctx) RETURNING eok, ecode, emsg
+    CALL checkTrue("expand-auth: apply ok (deny is not an error)", eok)
+    LET obj = r.rows.get(1)
+    CALL checkTrue("expand-auth: denied Orders omitted", NOT obj.has("Orders"))
+
+    # Granted target: scope grants Orders.read too -> Orders expansion present.
+    LET r = ODataProvider.fetchByKey(ent, "ALFKI")
+    LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL, "Orders", NULL)
+    LET ctx.scope = "Customers.read Orders.read"
+    CALL ODataExpand.applyAuthorized(ent, q, r.rows, ctx) RETURNING eok, ecode, emsg
+    CALL checkTrue("expand-auth: apply ok (granted)", eok)
+    LET obj = r.rows.get(1)
+    CALL checkTrue("expand-auth: granted Orders present", obj.has("Orders"))
+END FUNCTION
+
+#+ Regression for the $filter lambda authorization gap: a lambda navigates to a
+#+ target entity (here Orders), so a principal allowed to read Customers but not
+#+ Orders must have the request REJECTED (not silently evaluated). Granting
+#+ Orders.read allows it. Mirrors the $expand-auth gate but with a hard deny.
+FUNCTION testFilterLambdaAuth()
+    DEFINE q ODataTypes.T_ODataQuery
+    DEFINE ent ODataTypes.T_ODataEntity
+    DEFINE ctx ODataTypes.T_ODataAuthContext
+    DEFINE found, allowed BOOLEAN
+    DEFINE status INTEGER
+    DEFINE msg STRING
+
+    CALL ODataConfig.findEntity("Customers") RETURNING ent.*, found
+    CALL ODataAuth.configureScopes("", ".")
+    CALL ODataAuth.useScopeAuthorizer()
+    LET ctx.token = "test-token"
+
+    LET q = ODataQuery.parse("CustomerID", "Orders/any(o: o/Freight gt 50)",
+        NULL, NULL, "true", NULL, NULL, NULL)
+    CALL checkTrue("lambda-auth: parse ok", q.ok)
+
+    # Denied target: Customers.read only -> request rejected with 403.
+    LET ctx.scope = "Customers.read"
+    CALL ODataAuth.authorizeFilterNav(ent, q, ctx) RETURNING allowed, status, msg
+    CALL checkTrue("lambda-auth: denied target rejected", NOT allowed)
+    CALL checkInt("lambda-auth: deny status 403", status, 403)
+
+    # Granted target: Customers.read + Orders.read -> allowed.
+    LET ctx.scope = "Customers.read Orders.read"
+    CALL ODataAuth.authorizeFilterNav(ent, q, ctx) RETURNING allowed, status, msg
+    CALL checkTrue("lambda-auth: granted target allowed", allowed)
 END FUNCTION
 
 FUNCTION testLambda()

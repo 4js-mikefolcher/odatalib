@@ -280,6 +280,9 @@ PRIVATE FUNCTION dispatchGet(
     DEFINE resp util.JSONObject
     DEFINE eok BOOLEAN
     DEFINE ecode, emsg STRING
+    DEFINE lamOk BOOLEAN
+    DEFINE lamStatus INTEGER
+    DEFINE lamMsg STRING
 
     # Authorization hook (no-op when no authorizer is registered). Checked on the
     # requested name before existence is confirmed, so denial does not reveal
@@ -316,7 +319,7 @@ PRIVATE FUNCTION dispatchGet(
             IF NOT q.ok THEN
                 RETURN subErrCode(q.errorCode, q.errorMessage)
             END IF
-            CALL ODataExpand.apply(ent, q, result.rows)
+            CALL ODataExpand.applyAuthorized(ent, q, result.rows, authCtx)
                 RETURNING eok, ecode, emsg
             IF NOT eok THEN
                 RETURN subErrCode(ecode, emsg)
@@ -349,6 +352,19 @@ PRIVATE FUNCTION dispatchGet(
         RETURN subErrCode(q.errorCode, q.errorMessage)
     END IF
 
+    # Authorize navigation targets reached by a $filter lambda (any()/all()),
+    # including those inside an $apply filter(...). Unlike $expand (denied target
+    # silently omitted), a denied lambda target rejects the request: it is an
+    # inference channel over the target's columns, so we cannot just drop it.
+    CALL ODataAuth.authorizeFilterNav(ent, q, authCtx)
+        RETURNING lamOk, lamStatus, lamMsg
+    IF NOT lamOk THEN
+        IF lamStatus == 401 THEN
+            RETURN subErr(401, "Unauthorized", NVL(lamMsg, "Authentication required"))
+        END IF
+        RETURN subErr(403, "Forbidden", NVL(lamMsg, "Access denied"))
+    END IF
+
     # Make sure the navigation join keys are fetched even under a narrow $select.
     IF q.expandRoots.getLength() > 0 THEN
         LET q.selectList = ODataExpand.ensureJoinKeys(ent, q, q.selectList)
@@ -360,7 +376,7 @@ PRIVATE FUNCTION dispatchGet(
     END IF
 
     IF q.expandRoots.getLength() > 0 THEN
-        CALL ODataExpand.apply(ent, q, result.rows)
+        CALL ODataExpand.applyAuthorized(ent, q, result.rows, authCtx)
             RETURNING eok, ecode, emsg
         IF NOT eok THEN
             RETURN subErrCode(ecode, emsg)

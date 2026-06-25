@@ -34,6 +34,7 @@ IMPORT util
 IMPORT FGL com.fourjs.odatalib.ODataTypes
 IMPORT FGL com.fourjs.odatalib.ODataConfig
 IMPORT FGL com.fourjs.odatalib.ODataProvider
+IMPORT FGL com.fourjs.odatalib.ODataAuth
 
 # ---------------------------------------------------------------------------
 # Parent projection: ensure join keys are fetched
@@ -77,7 +78,9 @@ END FUNCTION
 # Apply expansion
 # ---------------------------------------------------------------------------
 
-#+ Expand every top-level navigation property into the parent rows in place.
+#+ Expand every top-level navigation property into the parent rows in place,
+#+ WITHOUT per-target authorization. Suitable for trusted callers (tests, the
+#+ smoke examples) where the request principal is not being gated.
 #+ Returns (ok, errorCode, errorMessage); on failure the caller raises the error.
 PUBLIC FUNCTION apply(
     entity ODataTypes.T_ODataEntity,
@@ -86,12 +89,52 @@ PUBLIC FUNCTION apply(
     RETURNS (BOOLEAN, STRING, STRING)
     DEFINE ok BOOLEAN
     DEFINE code, msg STRING
+    DEFINE noCtx ODataTypes.T_ODataAuthContext
     IF rows IS NULL OR rows.getLength() == 0 THEN
         RETURN TRUE, NULL, NULL
     END IF
     # (multi-value returns can't be forwarded via RETURN; capture then return)
-    CALL expandForest(entity, q, q.expandRoots, rows, 1) RETURNING ok, code, msg
+    CALL expandForest(entity, q, q.expandRoots, rows, 1, FALSE, noCtx)
+        RETURNING ok, code, msg
     RETURN ok, code, msg
+END FUNCTION
+
+#+ Like apply(), but authorizes each $expand target (at every nesting level)
+#+ against the request principal carried in `authCtx`. An expansion whose target
+#+ the authorizer denies is silently omitted (best-effort projection): the parent
+#+ rows simply lack that navigation property, and its nested expands are dropped
+#+ too. With no authorizer registered every target is allowed, so this behaves
+#+ exactly like apply(). This closes the $expand authorization bypass: the root
+#+ entity is gated by the service, and here every reachable target is gated too.
+PUBLIC FUNCTION applyAuthorized(
+    entity ODataTypes.T_ODataEntity,
+    q ODataTypes.T_ODataQuery,
+    rows util.JSONArray,
+    authCtx ODataTypes.T_ODataAuthContext)
+    RETURNS (BOOLEAN, STRING, STRING)
+    DEFINE ok BOOLEAN
+    DEFINE code, msg STRING
+    IF rows IS NULL OR rows.getLength() == 0 THEN
+        RETURN TRUE, NULL, NULL
+    END IF
+    CALL expandForest(entity, q, q.expandRoots, rows, 1, TRUE, authCtx)
+        RETURNING ok, code, msg
+    RETURN ok, code, msg
+END FUNCTION
+
+#+ TRUE when the request principal in `reqCtx` may read entity set `target`.
+#+ Reuses the request's scopes/token/user/headers, overriding only the entity and
+#+ operation. With no authorizer registered ODataAuth.authorize allows by default.
+PRIVATE FUNCTION targetAllowed(
+    reqCtx ODataTypes.T_ODataAuthContext, target STRING) RETURNS BOOLEAN
+    DEFINE a ODataTypes.T_ODataAuthContext
+    DEFINE res ODataTypes.T_ODataAuthResult
+    LET a.* = reqCtx.*
+    LET a.entity = target
+    LET a.operation = "read"
+    LET a.key = NULL
+    LET res = ODataAuth.authorize(a)
+    RETURN res.allowed
 END FUNCTION
 
 #+ Expand a list of node indices (one nesting level) into `rows`, then recurse
@@ -102,7 +145,9 @@ PRIVATE FUNCTION expandForest(
     q ODataTypes.T_ODataQuery,
     roots DYNAMIC ARRAY OF INTEGER,
     rows util.JSONArray,
-    depth INTEGER)
+    depth INTEGER,
+    gate BOOLEAN,
+    authCtx ODataTypes.T_ODataAuthContext)
     RETURNS (BOOLEAN, STRING, STRING)
     DEFINE i, maxDepth INTEGER
     DEFINE ok BOOLEAN
@@ -119,7 +164,7 @@ PRIVATE FUNCTION expandForest(
     END IF
 
     FOR i = 1 TO roots.getLength()
-        CALL expandNode(entity, q, roots[i], rows, depth)
+        CALL expandNode(entity, q, roots[i], rows, depth, gate, authCtx)
             RETURNING ok, code, msg
         IF NOT ok THEN
             RETURN FALSE, code, msg
@@ -136,7 +181,9 @@ PRIVATE FUNCTION expandNode(
     q ODataTypes.T_ODataQuery,
     ri INTEGER,
     rows util.JSONArray,
-    depth INTEGER)
+    depth INTEGER,
+    gate BOOLEAN,
+    authCtx ODataTypes.T_ODataAuthContext)
     RETURNS (BOOLEAN, STRING, STRING)
     DEFINE node ODataTypes.T_ODataExpandNode
     DEFINE nav ODataTypes.T_ODataNavigation
@@ -164,6 +211,14 @@ PRIVATE FUNCTION expandNode(
         RETURN FALSE, "InternalError",
             SFMT("Navigation target '%1' is not a declared entity", nav.target)
     END IF
+
+    # Authorization gate: if the request principal may not read the target entity,
+    # silently omit this expansion (and, by not recursing, its nested expands).
+    # The parent rows keep all their own fields; only the nav property is dropped.
+    IF gate AND NOT targetAllowed(authCtx, nav.target) THEN
+        RETURN TRUE, NULL, NULL
+    END IF
+
     LET fromProp = nav.on[1].fromProp
     LET toProp = nav.on[1].toProp
 
@@ -198,7 +253,7 @@ PRIVATE FUNCTION expandNode(
     # Multi-level: expand this node's children against the target entity, over the
     # related rows (shared JSON refs, so in-place expansion updates nested data).
     IF node.childRoots.getLength() > 0 THEN
-        CALL expandForest(tgt, q, node.childRoots, rel.rows, depth + 1)
+        CALL expandForest(tgt, q, node.childRoots, rel.rows, depth + 1, gate, authCtx)
             RETURNING ok, code, msg
         IF NOT ok THEN
             RETURN FALSE, code, msg

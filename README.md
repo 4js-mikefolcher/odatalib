@@ -119,6 +119,7 @@ exposes (with OData `Edm.*` types and the backing DB column for SQL providers).
 {
   "service": "northwind",
   "namespace": "Northwind",
+  "identifierQuote": "",         // SQL identifier quote char (optional; see Notes)
   "entities": [
     {
       "name": "Customers",          // entity set name (URL segment)
@@ -140,6 +141,28 @@ exposes (with OData `Edm.*` types and the backing DB column for SQL providers).
 Notes:
 - JSON keys map onto BDL records via `json_name` — `type` → `edmType`,
   `key` → `isKey`/`keyName`.
+- **`identifierQuote`** (service-level, optional) is the SQL quote character the
+  provider wraps every generated table/column identifier with. Empty/omitted (the
+  default) emits **unquoted** identifiers — portable across engines that case-fold
+  unquoted names, and the recommended setting. Use it only to reach a reserved-word
+  column (e.g. AdventureWorks `salesterritory.group`), which is otherwise a SQL
+  syntax error. Important caveats:
+  - **`` "`" `` (MySQL/MariaDB) works** — the backtick is passed straight through
+    to the server and quotes the identifier as expected.
+  - **`"\""` (ANSI double quote) does *not* work on the PostgreSQL (`dbmpgs`) or
+    Oracle (`dbmora`) ODI drivers.** These drivers rewrite every double-quoted
+    token into a *single-quoted string literal* on the wire — the native statement
+    becomes `… from 'customers'` — so the query fails (`-201` on Postgres,
+    `ORA-00903 invalid table name` on Oracle). This was verified to persist with
+    `DELIMIDENT` set as an environment variable *and* via FGLPROFILE
+    (`ifxemul.delimident`), at both compile and run time; none disable the
+    rewrite. Treat the double-quote variant as unsupported on these drivers.
+  - For a reserved-word column on Postgres/Oracle, the reliable workaround is to
+    expose a **view** (or a renamed column) and point the entity `source`/`column`
+    at it, rather than relying on `identifierQuote`.
+  - Quoting makes identifiers **case-sensitive** on most engines (Oracle folds
+    *unquoted* names to upper case), so the config column case must match the
+    physical column exactly when quoting is enabled.
 - **Keys** can be single or composite. The entity-level `"key"` is a shorthand
   for a single key; alternatively (and required for composite keys) flag each key
   property with `"key": true`. A composite key is addressed with the named form

@@ -24,6 +24,7 @@
 PACKAGE com.fourjs.odatalib
 
 IMPORT FGL com.fourjs.odatalib.ODataTypes
+IMPORT FGL com.fourjs.odatalib.ODataConfig
 
 PRIVATE DEFINE m_authorizer ODataTypes.T_ODataAuthFunc
 PRIVATE DEFINE m_hasAuthorizer BOOLEAN = FALSE
@@ -105,6 +106,54 @@ PUBLIC FUNCTION scopeAuthorizer(auth ODataTypes.T_ODataAuthContext)
         RETURN allow()
     END IF
     RETURN deny(403, SFMT("Missing required scope '%1'", required))
+END FUNCTION
+
+#+ Authorize the navigation targets reached by $filter lambda predicates
+#+ (`nav/any(...)`, `nav/all(...)`) on `ent`. Each lambda compiles to a correlated
+#+ subquery against the navigation's TARGET entity, so a caller could otherwise use
+#+ a lambda over a forbidden entity as an inference oracle even when its own root
+#+ entity is allowed. Nested lambdas are rejected at parse, so every lambda node's
+#+ navigation is rooted at `ent`. Reuses the request principal in `reqCtx`,
+#+ overriding only entity/operation.
+#+
+#+ Unlike $expand (which silently omits a denied target), a denied lambda target
+#+ must REJECT the request: silently dropping the predicate would change the result
+#+ set and itself leak information. Returns (allowed, httpStatus, message); allowed
+#+ is TRUE when every lambda target is permitted — and when no authorizer is
+#+ registered (authorize() allows by default), so open services are unaffected.
+PUBLIC FUNCTION authorizeFilterNav(
+    ent ODataTypes.T_ODataEntity,
+    q ODataTypes.T_ODataQuery,
+    reqCtx ODataTypes.T_ODataAuthContext)
+    RETURNS (BOOLEAN, INTEGER, STRING)
+    DEFINE i INTEGER
+    DEFINE nav ODataTypes.T_ODataNavigation
+    DEFINE found BOOLEAN
+    DEFINE a ODataTypes.T_ODataAuthContext
+    DEFINE res ODataTypes.T_ODataAuthResult
+
+    FOR i = 1 TO q.filterNodes.getLength()
+        IF q.filterNodes[i].kind != "lambda" THEN
+            CONTINUE FOR
+        END IF
+        CALL ODataConfig.findNavigation(ent, q.filterNodes[i].pred.property)
+            RETURNING nav.*, found
+        IF NOT found THEN
+            # Unknown navigation -> let the provider report it as a BadRequest.
+            CONTINUE FOR
+        END IF
+        LET a.* = reqCtx.*
+        LET a.entity = nav.target
+        LET a.operation = "read"
+        LET a.key = NULL
+        LET res = authorize(a)
+        IF NOT res.allowed THEN
+            RETURN FALSE, res.status,
+                NVL(res.message, SFMT(
+                    "Access to '%1' (via $filter navigation) is denied", nav.target))
+        END IF
+    END FOR
+    RETURN TRUE, 200, NULL
 END FUNCTION
 
 #+ TRUE if a space- or comma-separated scope string contains an exact token.

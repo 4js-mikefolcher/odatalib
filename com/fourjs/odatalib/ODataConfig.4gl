@@ -66,6 +66,16 @@ PUBLIC FUNCTION getNamespace() RETURNS STRING
     RETURN m_schema.namespace
 END FUNCTION
 
+#+ SQL identifier quote character for the target database (service-level config).
+#+ Empty/NULL (the default) means identifiers are emitted unquoted — the
+#+ historical behaviour, portable across engines that fold unquoted identifiers.
+#+ Set it to "`" for MySQL/MariaDB or "\"" (ANSI) for engines whose reserved-word
+#+ columns (e.g. "group") must be quoted. The SQL provider wraps every table and
+#+ column identifier with it via qid().
+PUBLIC FUNCTION getIdentifierQuote() RETURNS STRING
+    RETURN m_schema.identifierQuote
+END FUNCTION
+
 #+ Per-service cap on rows fetched while materialising a single $expand
 #+ (default 10000 when not configured).
 PUBLIC FUNCTION getExpandMaxRows() RETURNS INTEGER

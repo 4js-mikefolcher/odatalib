@@ -59,6 +59,8 @@ PUBLIC TYPE T_ODataSchema RECORD
     namespace STRING,                              # CSDL namespace
     expandMaxRows INTEGER,                          # cap on rows fetched per $expand (0 -> default)
     expandMaxDepth INTEGER,                         # cap on $expand nesting depth (0 -> default)
+    identifierQuote STRING                          # SQL identifier quote char (e.g. "`" for MySQL/MariaDB, "\"" for ANSI); empty -> unquoted
+        ATTRIBUTES(json_name = "identifierQuote"),
     entities DYNAMIC ARRAY OF T_ODataEntity
 END RECORD
 

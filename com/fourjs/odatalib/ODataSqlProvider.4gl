@@ -11,8 +11,12 @@
 #     shape is fully controlled by the .odata config.
 #   * JSON keys are taken from the config property names by SELECT position,
 #     not from getResultName(), so they are stable across database engines.
-#   * Paging uses a scroll cursor + fetchAbsolute(), which is database-agnostic
-#     (no dialect-specific LIMIT/OFFSET / TOP/SKIP).
+#   * Paging uses a forward-only cursor: open(), discard query.skip rows, then
+#     fetch() the page sequentially. Database-agnostic (no dialect LIMIT/OFFSET /
+#     TOP/SKIP) and avoids scrollable-cursor emulation, which MySQL/MariaDB back
+#     with a per-statement temp file.
+#   * Identifiers (table/column names) are wrapped with qid() using the optional
+#     service-level identifierQuote, so reserved-word columns (e.g. "group") work.
 #   * Filter values are bound as parameters (?), never concatenated into SQL.
 ################################################################################
 PACKAGE com.fourjs.odatalib
@@ -61,7 +65,7 @@ PUBLIC FUNCTION fetch(
     DEFINE selEdm DYNAMIC ARRAY OF STRING
     DEFINE params DYNAMIC ARRAY OF t_bindParam
     DEFINE selectClause, whereClause, orderClause, sql STRING
-    DEFINE pageSize, effLimit, pos, i, fetched INTEGER
+    DEFINE pageSize, effLimit, i, fetched INTEGER
     DEFINE sqlObj base.SqlHandle
     DEFINE rowObj util.JSONObject
     DEFINE prop ODataTypes.T_ODataProperty
@@ -101,7 +105,10 @@ PUBLIC FUNCTION fetch(
     END IF
 
     LET pageSize = entity.pageSize
-    IF pageSize <= 0 THEN LET pageSize = DEFAULT_PAGE_SIZE END IF
+    # NULL when "pageSize" is omitted from the .odata (absent JSON int -> NULL);
+    # NULL <= 0 is NULL (not TRUE), so guard NULL explicitly or effLimit stays
+    # NULL and the fetch loop never runs (no rows returned).
+    IF pageSize IS NULL OR pageSize <= 0 THEN LET pageSize = DEFAULT_PAGE_SIZE END IF
     IF pageSize > MAX_PAGE_SIZE THEN LET pageSize = MAX_PAGE_SIZE END IF
     LET effLimit = pageSize
     IF query.hasTop AND query.top < pageSize THEN
@@ -114,7 +121,7 @@ PUBLIC FUNCTION fetch(
     END IF
 
     LET sql = SFMT("SELECT %1 FROM %2%3%4",
-        selectClause, entity.source, whereClause, orderClause)
+        selectClause, qid(entity.source), whereClause, orderClause)
 
     TRY
         LET sqlObj = base.SqlHandle.create()
@@ -122,12 +129,19 @@ PUBLIC FUNCTION fetch(
         FOR i = 1 TO params.getLength()
             CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
         END FOR
-        CALL sqlObj.openScrollCursor()
+        CALL sqlObj.open()
 
-        LET pos = query.skip + 1
+        # Skip the first query.skip rows on a forward-only cursor.
+        FOR i = 1 TO query.skip
+            CALL sqlObj.fetch()
+            IF sqlca.sqlcode == NOTFOUND THEN
+                EXIT FOR
+            END IF
+        END FOR
+
         LET fetched = 0
         WHILE fetched < effLimit
-            CALL sqlObj.fetchAbsolute(pos)
+            CALL sqlObj.fetch()
             IF sqlca.sqlcode == NOTFOUND THEN
                 EXIT WHILE
             END IF
@@ -144,14 +158,13 @@ PUBLIC FUNCTION fetch(
             END FOR
             CALL res.rows.put(res.rows.getLength() + 1, rowObj)
             LET fetched = fetched + 1
-            LET pos = pos + 1
         END WHILE
 
         # A further server page exists only when we filled a full server page
         # (not when the client capped the result with a small $top, and never on
         # a maxRows expand fetch).
         IF query.maxRows == 0 AND fetched == effLimit AND effLimit == pageSize THEN
-            CALL sqlObj.fetchAbsolute(pos)
+            CALL sqlObj.fetch()
             IF sqlca.sqlcode != NOTFOUND THEN
                 LET res.hasMore = TRUE
             END IF
@@ -235,7 +248,7 @@ PUBLIC FUNCTION applyFetch(
     DEFINE outKeys DYNAMIC ARRAY OF STRING
     DEFINE outEdm DYNAMIC ARRAY OF STRING
     DEFINE params DYNAMIC ARRAY OF t_bindParam
-    DEFINE pageSize, effLimit, pos, i, fetched INTEGER
+    DEFINE pageSize, effLimit, i, fetched INTEGER
     DEFINE sqlObj base.SqlHandle
     DEFINE rowObj util.JSONObject
 
@@ -271,10 +284,13 @@ PUBLIC FUNCTION applyFetch(
     END IF
 
     LET sql = SFMT("SELECT %1 FROM %2%3%4%5",
-        selectClause, entity.source, whereClause, groupClause, orderClause)
+        selectClause, qid(entity.source), whereClause, groupClause, orderClause)
 
     LET pageSize = entity.pageSize
-    IF pageSize <= 0 THEN LET pageSize = DEFAULT_PAGE_SIZE END IF
+    # NULL when "pageSize" is omitted from the .odata (absent JSON int -> NULL);
+    # NULL <= 0 is NULL (not TRUE), so guard NULL explicitly or effLimit stays
+    # NULL and the fetch loop never runs (no rows returned).
+    IF pageSize IS NULL OR pageSize <= 0 THEN LET pageSize = DEFAULT_PAGE_SIZE END IF
     IF pageSize > MAX_PAGE_SIZE THEN LET pageSize = MAX_PAGE_SIZE END IF
     LET effLimit = pageSize
     IF query.hasTop AND query.top < pageSize THEN
@@ -287,12 +303,19 @@ PUBLIC FUNCTION applyFetch(
         FOR i = 1 TO params.getLength()
             CALL bindParam(sqlObj, i, params[i].edmType, params[i].value)
         END FOR
-        CALL sqlObj.openScrollCursor()
+        CALL sqlObj.open()
 
-        LET pos = query.skip + 1
+        # Skip the first query.skip grouped rows on a forward-only cursor.
+        FOR i = 1 TO query.skip
+            CALL sqlObj.fetch()
+            IF sqlca.sqlcode == NOTFOUND THEN
+                EXIT FOR
+            END IF
+        END FOR
+
         LET fetched = 0
         WHILE fetched < effLimit
-            CALL sqlObj.fetchAbsolute(pos)
+            CALL sqlObj.fetch()
             IF sqlca.sqlcode == NOTFOUND THEN
                 EXIT WHILE
             END IF
@@ -306,11 +329,10 @@ PUBLIC FUNCTION applyFetch(
             END FOR
             CALL res.rows.put(res.rows.getLength() + 1, rowObj)
             LET fetched = fetched + 1
-            LET pos = pos + 1
         END WHILE
 
         IF fetched == effLimit AND effLimit == pageSize THEN
-            CALL sqlObj.fetchAbsolute(pos)
+            CALL sqlObj.fetch()
             IF sqlca.sqlcode != NOTFOUND THEN
                 LET res.hasMore = TRUE
             END IF
@@ -363,7 +385,7 @@ PRIVATE FUNCTION buildApplySelect(
         END IF
         LET n = n + 1
         IF n > 1 THEN CALL buf.append(", ") END IF
-        CALL buf.append(col)
+        CALL buf.append(qid(col))
         LET outKeys[n] = query.apply.dims[i]
         CALL ODataConfig.findProperty(entity, query.apply.dims[i]) RETURNING prop.*, found
         LET outEdm[n] = prop.edmType
@@ -387,11 +409,11 @@ PRIVATE FUNCTION buildApplySelect(
                         agg.method, agg.source, prop.edmType)
             END IF
             CASE agg.method
-                WHEN "sum" LET expr = SFMT("SUM(%1)", col)
-                WHEN "average" LET expr = SFMT("AVG(%1)", col)
-                WHEN "min" LET expr = SFMT("MIN(%1)", col)
-                WHEN "max" LET expr = SFMT("MAX(%1)", col)
-                WHEN "countdistinct" LET expr = SFMT("COUNT(DISTINCT %1)", col)
+                WHEN "sum" LET expr = SFMT("SUM(%1)", qid(col))
+                WHEN "average" LET expr = SFMT("AVG(%1)", qid(col))
+                WHEN "min" LET expr = SFMT("MIN(%1)", qid(col))
+                WHEN "max" LET expr = SFMT("MAX(%1)", qid(col))
+                WHEN "countdistinct" LET expr = SFMT("COUNT(DISTINCT %1)", qid(col))
                 OTHERWISE
                     RETURN NULL, outKeys, outEdm, FALSE,
                         SFMT("Unsupported aggregate method '%1'", agg.method)
@@ -439,7 +461,7 @@ PRIVATE FUNCTION buildApplyGroupBy(
                 SFMT("Unknown property '%1' in $apply groupby", query.apply.dims[i])
         END IF
         IF i > 1 THEN CALL buf.append(", ") END IF
-        CALL buf.append(col)
+        CALL buf.append(qid(col))
     END FOR
     RETURN buf.toString(), TRUE, NULL
 END FUNCTION
@@ -468,7 +490,7 @@ PRIVATE FUNCTION buildApplyOrderBy(
         # a groupby dimension -> order by its column
         FOR j = 1 TO query.apply.dims.getLength()
             IF query.apply.dims[j] == term THEN
-                LET ref = ODataConfig.columnFor(entity, term)
+                LET ref = qid(ODataConfig.columnFor(entity, term))
                 LET matched = TRUE
                 EXIT FOR
             END IF
@@ -537,11 +559,11 @@ PRIVATE FUNCTION applyCount(
     FOR i = 1 TO query.apply.dims.getLength()
         LET col = ODataConfig.columnFor(entity, query.apply.dims[i])
         IF i > 1 THEN CALL buf.append(", ") END IF
-        CALL buf.append(col)
+        CALL buf.append(qid(col))
     END FOR
     LET groupCols = buf.toString()
     LET sql = SFMT("SELECT COUNT(*) FROM (SELECT 1 FROM %1%2 GROUP BY %3) t",
-        entity.source, whereClause, groupCols)
+        qid(entity.source), whereClause, groupCols)
     TRY
         LET sqlObj = base.SqlHandle.create()
         CALL sqlObj.prepare(sql)
@@ -586,7 +608,7 @@ PRIVATE FUNCTION buildSelect(
                     FALSE, SFMT("Unknown property '%1' in $select", prop)
             END IF
             IF i > 1 THEN CALL buf.append(", ") END IF
-            CALL buf.append(col)
+            CALL buf.append(qid(col))
             LET selProps[i] = prop
         END FOR
     ELSE
@@ -594,7 +616,7 @@ PRIVATE FUNCTION buildSelect(
             LET prop = entity.properties[i].name
             LET col = ODataConfig.columnFor(entity, prop)
             IF i > 1 THEN CALL buf.append(", ") END IF
-            CALL buf.append(col)
+            CALL buf.append(qid(col))
             LET selProps[i] = prop
         END FOR
     END IF
@@ -737,7 +759,7 @@ PRIVATE FUNCTION appendLambda(
         WHEN "any"
             CALL m_whereBuf.append(SFMT(
                 "EXISTS (SELECT 1 FROM %1 %2 WHERE %2.%3 = %4.%5",
-                target.source, alias, toCol, entity.source, fromCol))
+                qid(target.source), alias, qid(toCol), qid(entity.source), qid(fromCol)))
             IF node.left > 0 THEN
                 CALL m_whereBuf.append(" AND (")
                 LET m_colPrefix = SFMT("%1.", alias)
@@ -749,7 +771,7 @@ PRIVATE FUNCTION appendLambda(
         WHEN "all"
             CALL m_whereBuf.append(SFMT(
                 "NOT EXISTS (SELECT 1 FROM %1 %2 WHERE %2.%3 = %4.%5 AND NOT (",
-                target.source, alias, toCol, entity.source, fromCol))
+                qid(target.source), alias, qid(toCol), qid(entity.source), qid(fromCol)))
             LET m_colPrefix = SFMT("%1.", alias)
             CALL buildNode(target, query, node.left)
             LET m_colPrefix = savedPrefix
@@ -815,8 +837,9 @@ PRIVATE FUNCTION appendPredicate(
     IF col IS NULL OR col.getLength() == 0 THEN
         LET col = prop.name
     END IF
-    # Qualify with the active subquery alias (empty outside a lambda subquery).
-    LET col = SFMT("%1%2", m_colPrefix, col)
+    # Quote the column, then qualify with the active subquery alias (empty outside
+    # a lambda subquery; the alias is a generated safe identifier, left unquoted).
+    LET col = SFMT("%1%2", m_colPrefix, qid(col))
 
     # Portable value function on the LHS (tolower/toupper/trim/length/round): wrap
     # the column in the ANSI SQL function and bind the literal against the
@@ -977,7 +1000,7 @@ PRIVATE FUNCTION buildOrderBy(
                     query.orderby[i].property)
         END IF
         IF i > 1 THEN CALL buf.append(", ") END IF
-        CALL buf.append(col)
+        CALL buf.append(qid(col))
         IF query.orderby[i].descending THEN
             CALL buf.append(" DESC")
         END IF
@@ -1001,7 +1024,7 @@ PRIVATE FUNCTION countRows(
         RETURN 0, FALSE, dummy
     END IF
 
-    LET sql = SFMT("SELECT COUNT(*) FROM %1%2", entity.source, whereClause)
+    LET sql = SFMT("SELECT COUNT(*) FROM %1%2", qid(entity.source), whereClause)
     TRY
         LET sqlObj = base.SqlHandle.create()
         CALL sqlObj.prepare(sql)
@@ -1038,6 +1061,9 @@ PRIVATE FUNCTION bindParam(
     DEFINE fv FLOAT
     DEFINE dv DECIMAL
     DEFINE dt DATE
+    DEFINE boolv BOOLEAN   # declared with the other bind locals (a block-scoped
+                           # VAR in the WHEN arm would also work; DEFINE keeps
+                           # this branch consistent with the ones above)
 
     CASE edmType
         WHEN "Edm.Int16"
@@ -1067,8 +1093,15 @@ PRIVATE FUNCTION bindParam(
         WHEN "Edm.Date"
             LET dt = isoToDate(val)
             CALL sqlObj.setParameter(idx, dt)
+        WHEN "Edm.Boolean"
+            # Bind a real BOOLEAN so the ODI driver sends a dialect-correct
+            # parameter (PostgreSQL boolean; TINYINT/NUMBER on MariaDB/Oracle)
+            # rather than the text literal "true"/"false", which strict engines
+            # (PostgreSQL) reject with "operator does not exist: boolean = text".
+            LET boolv = (val.toLowerCase() == "true" OR val == "1")
+            CALL sqlObj.setParameter(idx, boolv)
         OTHERWISE
-            # Edm.String, Edm.Boolean, Edm.Guid, Edm.DateTimeOffset, unknown
+            # Edm.String, Edm.Guid, Edm.DateTimeOffset, unknown
             CALL sqlObj.setParameter(idx, val)
     END CASE
 END FUNCTION
@@ -1096,6 +1129,14 @@ PRIVATE FUNCTION validateLiteral(edmType STRING, val STRING)
             IF NOT isDecimalLiteral(val) THEN RETURN FALSE, badLiteral(val, "number") END IF
         WHEN "Edm.Date"
             IF NOT isIsoDate(val) THEN RETURN FALSE, badLiteral(val, "date (yyyy-mm-dd)") END IF
+        WHEN "Edm.Boolean"
+            CASE val.toLowerCase()
+                WHEN "true"
+                WHEN "false"
+                WHEN "1"
+                WHEN "0"
+                OTHERWISE RETURN FALSE, badLiteral(val, "boolean (true/false)")
+            END CASE
         OTHERWISE
             # textual / unvalidated types pass through
     END CASE
@@ -1208,6 +1249,20 @@ PRIVATE FUNCTION singleValue(raw SMALLFLOAT) RETURNS DECIMAL
     END IF
     LET s = raw
     RETURN s
+END FUNCTION
+
+#+ Quote a SQL identifier (table or column) with the service-level identifier
+#+ quote char (ODataConfig.getIdentifierQuote). When none is configured the name
+#+ is returned unchanged — the historical unquoted behaviour, portable across
+#+ engines that case-fold unquoted identifiers. Configuring "`" (MySQL/MariaDB) or
+#+ "\"" (ANSI) lets reserved-word columns such as "group" be queried.
+PRIVATE FUNCTION qid(name STRING) RETURNS STRING
+    DEFINE q STRING
+    LET q = ODataConfig.getIdentifierQuote()
+    IF q IS NULL OR q.getLength() == 0 THEN
+        RETURN name
+    END IF
+    RETURN SFMT("%1%2%1", q, name)
 END FUNCTION
 
 #+ Escape the LIKE wildcard metacharacters (\, %, _) in a user-supplied

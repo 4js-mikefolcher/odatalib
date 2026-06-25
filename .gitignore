@@ -19,6 +19,7 @@ CLAUDE.md
 .mcp.json
 .codex/
 AGENTS.md
+docs/
 
 # GAS deployment descriptors — they bake in an absolute project path, so each
 # checkout keeps its own. See README "GAS deployment" for the template.
