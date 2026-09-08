@@ -23,6 +23,11 @@ PRIVATE DEFINE m_loaded BOOLEAN = FALSE
 #+ Load and parse a .odata config file. Returns TRUE on success.
 PUBLIC FUNCTION loadConfigFromFile(path STRING) RETURNS BOOLEAN
     DEFINE jsonText STRING
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET jsonText = readWholeFile(path)
     IF jsonText IS NULL OR jsonText.getLength() == 0 THEN
         RETURN FALSE

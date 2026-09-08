@@ -58,6 +58,11 @@ PUBLIC FUNCTION parse(
 
     DEFINE q ODataTypes.T_ODataQuery
 
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET q.ok = TRUE
     LET q.skip = 0
     LET q.top = 0

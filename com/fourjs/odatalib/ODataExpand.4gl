@@ -55,6 +55,11 @@ PUBLIC FUNCTION ensureJoinKeys(
     DEFINE nav ODataTypes.T_ODataNavigation
     DEFINE found BOOLEAN
 
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     FOR i = 1 TO selectList.getLength()
         LET out[i] = selectList[i]
     END FOR

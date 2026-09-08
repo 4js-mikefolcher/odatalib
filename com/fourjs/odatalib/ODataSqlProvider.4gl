@@ -71,6 +71,11 @@ PUBLIC FUNCTION fetch(
     DEFINE prop ODataTypes.T_ODataProperty
     DEFINE found BOOLEAN
 
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET res.ok = TRUE
     LET res.rows = util.JSONArray.create()
     LET res.count = 0

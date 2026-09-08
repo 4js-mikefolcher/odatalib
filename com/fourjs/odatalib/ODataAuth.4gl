@@ -39,6 +39,11 @@ PRIVATE DEFINE m_scopeSeparator STRING = "."
 
 #+ Register a custom authorizer callback (function reference).
 PUBLIC FUNCTION setAuthorizer(fn ODataTypes.T_ODataAuthFunc)
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET m_authorizer = fn
     LET m_hasAuthorizer = TRUE
 END FUNCTION

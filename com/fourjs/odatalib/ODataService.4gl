@@ -51,6 +51,22 @@ PRIVATE DEFINE m_metadataFile STRING
 #+ service is then OPEN (every request allowed), which is almost never what a
 #+ public deployment wants. Register an authorizer BEFORE calling register().
 PUBLIC FUNCTION register(serviceName STRING)
+    # Propagate faults to the caller's exception boundary.
+    #
+    # WHENEVER is a LEXICAL, module-scoped directive: it governs every source
+    # line that follows it in this module, across all later functions. It is
+    # placed in the first function on purpose — a module-level placement is a
+    # compile error (-6609).
+    #
+    # ANY ERROR, not ERROR: plain `WHENEVER ERROR` does not cover expression
+    # errors (conversion, divide-by-zero), and with NO directive at all those are
+    # swallowed in silence — `status` stays 0 and execution continues with a NULL
+    # or 0 result. RAISE, not STOP/CONTINUE: without RAISE a fault is handled at
+    # its own site (swallowed, or the DVM stopped) and a TRY/CATCH in the CALLING
+    # module never sees it, so the boundary in ODataService is inert. All four
+    # behaviours measured on 6.00.02; see ODataService.dispatchGet.
+    WHENEVER ANY ERROR RAISE
+
     IF NOT ODataAuth.isEnabled() THEN
         DISPLAY "WARNING [odatalib]: no authorizer registered - the OData service ",
             "is OPEN (all requests allowed, anonymous access). Before any public ",
@@ -107,7 +123,17 @@ PUBLIC FUNCTION getServiceDocument()
         WSPath = "/",
         WSDescription = "OData service document (entity set listing)")
     RETURNS util.JSONObject ATTRIBUTES(WSMedia = "application/json")
-    RETURN ODataSerializer.buildServiceDocument(serviceBaseUrl())
+    DEFINE doc util.JSONObject
+    DEFINE errNo INTEGER
+    TRY
+        LET doc = ODataSerializer.buildServiceDocument(serviceBaseUrl())
+    CATCH
+        LET errNo = status
+        CALL ODataError.raise(500, "InternalError",
+            SFMT("Could not build the service document (status %1)", errNo))
+        RETURN NULL
+    END TRY
+    RETURN doc
 END FUNCTION
 
 #+ CSDL $metadata document.
@@ -122,18 +148,30 @@ PUBLIC FUNCTION getMetadata()
     RETURNS STRING ATTRIBUTES(WSAttachment, WSMedia = "application/xml")
     DEFINE xml STRING
     DEFINE ch base.Channel
+    DEFINE errNo INTEGER
 
     # NOTE: GAS streams the attachment with Content-Type text/xml (derived from
     # the .xml extension). text/xml is a valid XML media type (RFC 7303) accepted
     # by OData clients incl. Power BI; the body is raw, well-formed CSDL.
-    LET xml = ODataSerializer.buildMetadata()
-    IF m_metadataFile IS NULL THEN
-        LET m_metadataFile = os.Path.makeTempName() || ".xml"
-    END IF
-    LET ch = base.Channel.create()
-    CALL ch.openFile(m_metadataFile, "w")
-    CALL ch.writeNoNL(xml)
-    CALL ch.close()
+    #
+    # The channel work is guarded: openFile/writeNoNL raise on a full or
+    # read-only temp filesystem, and an unguarded raise here would end the
+    # request with no OData body (and can cost the pooled DVM).
+    TRY
+        LET xml = ODataSerializer.buildMetadata()
+        IF m_metadataFile IS NULL THEN
+            LET m_metadataFile = os.Path.makeTempName() || ".xml"
+        END IF
+        LET ch = base.Channel.create()
+        CALL ch.openFile(m_metadataFile, "w")
+        CALL ch.writeNoNL(xml)
+        CALL ch.close()
+    CATCH
+        LET errNo = status
+        CALL ODataError.raise(500, "InternalError",
+            SFMT("Could not build the metadata document (status %1)", errNo))
+        RETURN NULL
+    END TRY
     RETURN m_metadataFile
 END FUNCTION
 
@@ -258,12 +296,52 @@ END FUNCTION
 # Shared request core (non-raising) — used by the direct GET and by $batch
 # ---------------------------------------------------------------------------
 
+#+ Exception boundary around the GET core.
+#+
+#+ Everything below this point parses client-controlled strings ($filter,
+#+ $orderby, $expand, $apply, key predicates) and then talks to a driver. A
+#+ defect there must not escape as an untrapped runtime fault: the engine would
+#+ end the request without an OData body, and the DVM can be lost with it —
+#+ which on GAS costs the whole pooled process, not just this call. The CATCH
+#+ maps any such fault onto a normal 500 sub-response, so a direct GET renders
+#+ it through SetRestError and a $batch echoes it in the response array.
+#+
+#+ Scope of the net (measured on 6.00.02, not assumed): TRY/CATCH DOES trap
+#+ conversion (-1215) and divide-by-zero (-1202) here even though no WHENEVER
+#+ directive is in scope, because a TRY block suspends the (absent) WHENEVER
+#+ handler and routes the error to CATCH. It does NOT trap an array-bounds
+#+ violation (-1326) — that terminates the program even with
+#+ `WHENEVER ANY ERROR RAISE` active, so it cannot be recovered here. Index
+#+ checking in the parsers therefore still matters; this is a safety net, not a
+#+ substitute for it.
+PRIVATE FUNCTION dispatchGet(
+    name STRING, keyVal STRING, isKeyReq BOOLEAN,
+    pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
+    pOrderby STRING, pExpand STRING, pApply STRING,
+    hScopes STRING, hUser STRING, baseUrl STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE sub ODataTypes.T_ODataSubResponse
+    DEFINE errNo INTEGER
+    TRY
+        LET sub = dispatchGetCore(name, keyVal, isKeyReq,
+            pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply,
+            hScopes, hUser, baseUrl)
+    CATCH
+        # Capture `status` FIRST: it is reset by the next non-assignment
+        # statement, so reading it after any other call loses the error number.
+        LET errNo = status
+        RETURN subErr(500, "InternalError",
+            SFMT("Unhandled error serving '%1' (status %2)", name, errNo))
+    END TRY
+    RETURN sub
+END FUNCTION
+
 #+ Handle one GET request (collection / key lookup) and RETURN its outcome
 #+ instead of raising it: (status, errorCode, errorMessage, body). On success
 #+ body is the payload JSON and status is 200; on failure body is the OData
 #+ error envelope and status is the mapped HTTP code. This is the single source
 #+ of truth for request handling — getEntitySet and batch() both call it.
-PRIVATE FUNCTION dispatchGet(
+PRIVATE FUNCTION dispatchGetCore(
     name STRING, keyVal STRING, isKeyReq BOOLEAN,
     pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
     pOrderby STRING, pExpand STRING, pApply STRING,
@@ -424,10 +502,33 @@ PRIVATE FUNCTION subErrCode(code STRING, message STRING)
     RETURN subErr(ODataError.httpStatusFor(code), code, message)
 END FUNCTION
 
+#+ Exception boundary around the navigation core — see dispatchGet for what
+#+ TRY/CATCH does and does not trap here.
+PRIVATE FUNCTION dispatchNavigation(
+    parentName STRING, keyVal STRING, isKeyReq BOOLEAN, navProp STRING,
+    pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
+    pOrderby STRING, pExpand STRING, pApply STRING,
+    hScopes STRING, hUser STRING, baseUrl STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE sub ODataTypes.T_ODataSubResponse
+    DEFINE errNo INTEGER
+    TRY
+        LET sub = dispatchNavigationCore(parentName, keyVal, isKeyReq, navProp,
+            pSelect, pFilter, pTop, pSkip, pCount, pOrderby, pExpand, pApply,
+            hScopes, hUser, baseUrl)
+    CATCH
+        LET errNo = status
+        RETURN subErr(500, "InternalError",
+            SFMT("Unhandled error traversing '%1/%2' (status %3)",
+                parentName, navProp, errNo))
+    END TRY
+    RETURN sub
+END FUNCTION
+
 #+ Navigation traversal core: resolve the parent key's join value, then read the
 #+ related set on the target with a synthesized "toProp eq <value>" filter AND-ed
 #+ with the client's options. to-many -> collection; to-one -> single entity.
-PRIVATE FUNCTION dispatchNavigation(
+PRIVATE FUNCTION dispatchNavigationCore(
     parentName STRING, keyVal STRING, isKeyReq BOOLEAN, navProp STRING,
     pSelect STRING, pFilter STRING, pTop STRING, pSkip STRING, pCount STRING,
     pOrderby STRING, pExpand STRING, pApply STRING,
@@ -626,9 +727,29 @@ PUBLIC FUNCTION batch(req ODataTypes.T_ODataBatchRequest)
     RETURN root
 END FUNCTION
 
+#+ Exception boundary around one batch sub-request. Guarding each sub-request
+#+ individually (rather than the whole batch) keeps one malformed URL from
+#+ discarding the sibling responses: the bad entry becomes a 500 inside the
+#+ batch array and the remaining sub-requests still run. The URL splitting and
+#+ percent-decoding this wraps happen BEFORE dispatchGet's own boundary, so
+#+ they would otherwise be unguarded.
+PRIVATE FUNCTION dispatchBatchUrl(url STRING)
+    RETURNS ODataTypes.T_ODataSubResponse
+    DEFINE sub ODataTypes.T_ODataSubResponse
+    DEFINE errNo INTEGER
+    TRY
+        LET sub = dispatchBatchUrlCore(url)
+    CATCH
+        LET errNo = status
+        RETURN subErr(500, "InternalError",
+            SFMT("Unhandled error in batch sub-request (status %1)", errNo))
+    END TRY
+    RETURN sub
+END FUNCTION
+
 #+ Route one batch sub-request URL (service-root-relative) through dispatchGet.
 #+ Authorization uses the batch POST's own headers/context.
-PRIVATE FUNCTION dispatchBatchUrl(url STRING)
+PRIVATE FUNCTION dispatchBatchUrlCore(url STRING)
     RETURNS ODataTypes.T_ODataSubResponse
     DEFINE pathSeg, queryStr, name, keyVal STRING
     DEFINE isKeyReq BOOLEAN

@@ -42,6 +42,11 @@ PRIVATE DEFINE m_registry DICTIONARY OF ODataTypes.T_ODataProviderFunc
 #+ Register a customer callback for a function-backed entity set.
 PUBLIC FUNCTION register(
     entityName STRING, fn ODataTypes.T_ODataProviderFunc)
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET m_registry[entityName] = fn
 END FUNCTION
 

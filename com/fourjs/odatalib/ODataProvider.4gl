@@ -25,6 +25,11 @@ PUBLIC FUNCTION fetch(
     RETURNS ODataTypes.T_ODataResult
     DEFINE res ODataTypes.T_ODataResult
 
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     # $apply (aggregation) reshapes the result into dynamic columns; only the SQL
     # provider can express it (a function callback returns fixed entity rows).
     IF query.apply.present THEN

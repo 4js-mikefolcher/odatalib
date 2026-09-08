@@ -237,6 +237,34 @@ the library never has to import customer code and SQL-only apps carry no cost.
 See [`examples/NorthwindFunctions.4gl`](examples/NorthwindFunctions.4gl) for a
 working `CountrySummary` provider that aggregates customers by country.
 
+4. **Declare `WHENEVER ANY ERROR RAISE` in your callback's module.** The
+   framework wraps every request in an exception boundary that turns an
+   unexpected fault into a `500` OData error instead of losing the request (and
+   potentially the pooled DVM). That boundary can only see faults your module
+   lets escape, and BDL's default is not to let them escape:
+
+   | Your module declares | A fault in your callback |
+   |---|---|
+   | nothing | expression errors (conversion, divide-by-zero) are **silently swallowed** — `status` stays `0` and your provider returns wrong rows; a SQL error **stops the DVM** |
+   | `WHENEVER ANY ERROR RAISE` | propagates to the framework boundary → clean `500 InternalError` |
+
+   Put it as the first statement of the **first function in the file** — the
+   directive is lexical and module-scoped, so it then governs every function
+   below it. A module-level placement (before the first `FUNCTION`) is a
+   compile error.
+
+   ```4gl
+   PUBLIC FUNCTION provideCountrySummary(
+       entity STRING, query ODataTypes.T_ODataQuery)
+       RETURNS ODataTypes.T_ODataResult
+       DEFINE res ODataTypes.T_ODataResult
+       WHENEVER ANY ERROR RAISE
+       ...
+   ```
+
+   Prefer returning `ODataFunctionProvider.errorResult(code, msg)` for errors
+   you expect — the boundary is for the ones you don't.
+
 ---
 
 ## Authorization

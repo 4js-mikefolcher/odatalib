@@ -28,6 +28,11 @@ PUBLIC FUNCTION buildServiceDocument(baseUrl STRING) RETURNS util.JSONObject
     DEFINE i INTEGER
     DEFINE ent ODataTypes.T_ODataEntity
 
+    # Propagate faults to the caller's exception boundary. Lexical and
+    # module-scoped: governs every line after it in this module. See the full
+    # rationale on the same directive in ODataService.
+    WHENEVER ANY ERROR RAISE
+
     LET root = util.JSONObject.create()
     CALL root.put("@odata.context", SFMT("%1/$metadata", baseUrl))
     LET arr = util.JSONArray.create()
