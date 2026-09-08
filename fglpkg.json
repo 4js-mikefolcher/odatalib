@@ -5,6 +5,7 @@
   "author": "michael.folcher@4js.com",
   "license": "Apache-2.0",
   "repository": "https://github.com/4js-mikefolcher/odatalib",
+  "genero": ">=5.0.0",
   "dependencies": {},
   "root": "com/fourjs/odatalib",
   "files": [
