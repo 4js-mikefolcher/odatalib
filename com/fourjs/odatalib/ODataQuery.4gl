@@ -1176,9 +1176,21 @@ PRIVATE FUNCTION stripQuotes(s STRING) RETURNS STRING
     RETURN s
 END FUNCTION
 
+#+ TRUE when `s` is a non-empty run of digits that also FITS IN AN `INTEGER`.
+#+
+#+ The range check is not cosmetic. Callers use this as the guard before
+#+ assigning the string to an INTEGER field (`q.top`, `q.skip`, and the same
+#+ fields on an $expand node). A value above INTEGER range makes that assignment
+#+ raise a conversion error which BDL SWALLOWS SILENTLY when the module declares
+#+ no `WHENEVER ANY ERROR` — `status` stays 0 and the target is left NULL. The
+#+ option would then be neither honoured nor rejected: `$top=2147483648` used to
+#+ leave `top` NULL with `hasTop` TRUE, and since `NULL < pageSize` is not TRUE
+#+ the provider silently ignored $top and returned a default page instead of the
+#+ 400 the client is owed. Bounding the value here keeps the guard honest.
 PRIVATE FUNCTION isUnsignedInt(s STRING) RETURNS BOOLEAN
     DEFINE i INTEGER
     DEFINE c STRING
+    DEFINE digits STRING
     IF s IS NULL OR s.getLength() == 0 THEN
         RETURN FALSE
     END IF
@@ -1188,6 +1200,20 @@ PRIVATE FUNCTION isUnsignedInt(s STRING) RETURNS BOOLEAN
             RETURN FALSE
         END IF
     END FOR
+    # Drop leading zeros first, so a zero-padded but in-range value such as
+    # "0000000005" is still accepted (it converts cleanly to 5).
+    LET digits = s
+    WHILE digits.getLength() > 1 AND digits.getCharAt(1) == "0"
+        LET digits = digits.subString(2, digits.getLength())
+    END WHILE
+    # INTEGER is signed 32-bit: max 2147483647 (10 digits). For two digit runs of
+    # equal length a lexicographic compare is a numeric compare.
+    IF digits.getLength() > 10 THEN
+        RETURN FALSE
+    END IF
+    IF digits.getLength() == 10 AND digits > "2147483647" THEN
+        RETURN FALSE
+    END IF
     RETURN TRUE
 END FUNCTION
 

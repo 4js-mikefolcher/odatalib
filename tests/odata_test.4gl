@@ -53,6 +53,7 @@ MAIN
     CALL testApply()
     CALL testFunctionProvider()
     CALL testErrors()
+    CALL testTopSkipBounds()
     CALL testExpandAuth()        # registers a global authorizer
     CALL testFilterLambdaAuth()  # last: relies on the scope authorizer
 
@@ -308,6 +309,78 @@ FUNCTION testErrors()
 
     # unknown property -> provider BadRequest
     CALL checkProviderErr("Orders", "Bogus eq 1", "BadRequest")
+END FUNCTION
+
+# $top / $skip must be rejected when they cannot fit in an INTEGER. A value
+# above range used to pass the digits-only guard and then silently fail the
+# STRING->INTEGER assignment (BDL swallows that conversion error when no
+# WHENEVER ANY ERROR is in scope), leaving the option neither honoured nor
+# rejected. Boundary + zero-padding cases are pinned so the guard cannot
+# regress into rejecting legitimate values either.
+FUNCTION testTopSkipBounds()
+    DEFINE q ODataTypes.T_ODataQuery
+
+    # --- in range: honoured, value preserved ---
+    LET q = ODataQuery.parse(NULL, NULL, "10", NULL, NULL, NULL, NULL, NULL)
+    CALL checkTrue("$top=10 accepted", q.ok)
+    CALL checkInt("$top=10 value", q.top, 10)
+
+    # INTEGER max is exactly representable and must stay accepted.
+    LET q = ODataQuery.parse(NULL, NULL, "2147483647", NULL, NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$top=2147483647 accepted", q.ok)
+    CALL checkInt("$top=2147483647 value", q.top, 2147483647)
+
+    # Zero-padded but in range -> still accepted, leading zeros ignored.
+    LET q = ODataQuery.parse(NULL, NULL, "0000000005", NULL, NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$top=0000000005 accepted", q.ok)
+    CALL checkInt("$top=0000000005 value", q.top, 5)
+
+    # --- out of range: clean 400, never a silent NULL ---
+    # One past INTEGER max.
+    LET q = ODataQuery.parse(NULL, NULL, "2147483648", NULL, NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$top=2147483648 rejected", NOT q.ok)
+    CALL checkStr("$top overflow code", q.errorCode, "BadRequest")
+    CALL checkTrue("$top overflow leaves hasTop FALSE", NOT q.hasTop)
+
+    # Same length as INTEGER max but larger (exercises the equal-length compare).
+    LET q = ODataQuery.parse(NULL, NULL, "9999999999", NULL, NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$top=9999999999 rejected", NOT q.ok)
+
+    # Far beyond range.
+    LET q = ODataQuery.parse(NULL, NULL, "99999999999999999999", NULL, NULL,
+        NULL, NULL, NULL)
+    CALL checkTrue("$top=99999999999999999999 rejected", NOT q.ok)
+
+    # Zero-padded and out of range -> rejected (padding must not mask the value).
+    LET q = ODataQuery.parse(NULL, NULL, "0002147483648", NULL, NULL, NULL,
+        NULL, NULL)
+    CALL checkTrue("$top=0002147483648 rejected", NOT q.ok)
+
+    # --- $skip shares the guard ---
+    LET q = ODataQuery.parse(NULL, NULL, NULL, "2147483647", NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$skip=2147483647 accepted", q.ok)
+    CALL checkInt("$skip=2147483647 value", q.skip, 2147483647)
+
+    LET q = ODataQuery.parse(NULL, NULL, NULL, "2147483648", NULL, NULL, NULL,
+        NULL)
+    CALL checkTrue("$skip=2147483648 rejected", NOT q.ok)
+    CALL checkStr("$skip overflow code", q.errorCode, "BadRequest")
+
+    # --- the nested $expand form uses the same guard ---
+    LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL,
+        "Orders($top=2147483648)", NULL)
+    CALL checkTrue("$expand nested $top overflow rejected", NOT q.ok)
+    CALL checkStr("$expand nested $top overflow code", q.errorCode,
+        "BadRequest")
+
+    LET q = ODataQuery.parse(NULL, NULL, NULL, NULL, NULL, NULL,
+        "Orders($skip=99999999999999999999)", NULL)
+    CALL checkTrue("$expand nested $skip overflow rejected", NOT q.ok)
 END FUNCTION
 
 # ---------------------------------------------------------------------------
