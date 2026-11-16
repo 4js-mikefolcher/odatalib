@@ -540,6 +540,36 @@ at the **GAS level** with an `<HTTP>` header rule in the dispatcher configuratio
 
 All clients we tested (Power BI, JSON/HTTP clients) interoperate without it.
 
+**Percent-encoded option names (`%24top`).** Some clients and HTTP libraries
+percent-encode the `$` in a query option *name* and send `?%24top=5` instead of
+`?$top=5`. GWS matches query names literally against the declared `WSName`, so
+without help it answers `400 Unexpected Rest query parameter` (empty body) before
+odatalib runs. Every `$`-option on `getEntitySet`, `getEntityCount` and
+`getNavigation` is therefore declared twice — as `$top` and as `%24top` — and the
+two spellings are merged before the request is handled. Mixed forms work
+(`?$top=2&%24select=CustomerID`); if one option arrives in both spellings the `$`
+form wins. Unknown names are still rejected (`?%24bogus=1` and `?foo=1` → `400`).
+Percent-encoded *values* (`%20`, `%27`, `%2C`) and `%24` in a *path* segment
+(`Orders/%24count`) never needed this. Side effect: the OpenAPI description GWS
+publishes for the service (`<service-url>?openapi.json`) lists both spellings of
+each option; the `%24` entries are described as "Alias of `$…`".
+
+[`tests/gas_encoding_test.sh`](tests/gas_encoding_test.sh) checks this against a
+**running** service (it needs GAS, so it is not part of `make test`): for each case
+it requests the encoded and the plain form and asserts status `200` with
+byte-identical bodies, then asserts that unknown options still return `400` and
+that `$batch` sub-URLs accept `%24`.
+
+```bash
+# northwind-pg.odata (default profile)
+ODATA_URL=http://localhost:6394/ws/r/northwind/northwind tests/gas_encoding_test.sh
+# adventureworks.odata
+ODATA_PROFILE=adventureworks ODATA_URL=http://localhost/gas6/ws/r/<xcf>/adventureworks \
+    tests/gas_encoding_test.sh
+```
+
+`ODATA_CURL_OPTS` passes extra arguments to `curl` (e.g. `-u user:password`).
+
 ## Limitations & roadmap
 
 **Not yet implemented (v0 scope):**
@@ -663,3 +693,9 @@ All clients we tested (Power BI, JSON/HTTP clients) interoperate without it.
   `-2` / `-4` / `-10` (per the documented engine contract); transient
   per-connection codes such as `-3` no longer end the process, so the GAS pool
   reuses the DVM instead of churning under load.
+- *Percent-encoded query option names (v1.2.1).* Clients that send `?%24top=5`
+  instead of `?$top=5` are accepted: every `$`-option of the collection, `/$count`
+  and navigation endpoints is also declared as its `%24` spelling and merged before
+  dispatch (previously GWS rejected the request with an empty `400`). Plain-`$`
+  behaviour is unchanged. See *GAS deployment* and
+  [`docs/resolved-issues/percent-encoded-query-options.md`](docs/resolved-issues/percent-encoded-query-options.md).

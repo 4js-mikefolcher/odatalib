@@ -11,6 +11,7 @@ carries its fix.
 |-------|----------|----------|
 | [Relationship traversal bypassed the authorizer](expand-authorization-bypass.md) — `$expand` / `$filter` lambda cross-entity disclosure | ≤ v1.0.1 | **v1.0.2** |
 | [`$filter` on an `Edm.Boolean` column failed on PostgreSQL](postgres-boolean-filter.md) — and returned wrong rows on MariaDB | ≤ v1.0.1 | **v1.0.2** |
+| [Percent-encoded query option names were rejected by GWS](percent-encoded-query-options.md) — `?%24top=5` answered `400` with an empty body | ≤ v1.2.0 | **v1.2.1** |
 
 Open issues, if any, are tracked in the GitHub issue tracker and summarised
 under *Limitations & roadmap* in the [README](../../README.md).
