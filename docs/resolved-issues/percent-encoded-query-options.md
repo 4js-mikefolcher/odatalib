@@ -110,16 +110,22 @@ AdventureWorks (`examples/adventureworks.odata`), served by a standalone GAS
 | 39 plain-`$` requests (paging links, `$expand`, `$apply`, `$metadata`, 400/404 envelopes) plus `$batch`, compared old vs new | — | identical status and body |
 | `make test` (in-memory SQLite) | 62 / 62 | 62 / 62 |
 | `make test-portability` (live PostgreSQL) | — | AdventureWorks 47 / 47, Northwind 40 / 40 |
+| Genero 5.01.02 (GAS 6.00.03 dispatcher): `make test`; `make test-portability`; `tests/gas_encoding_test.sh` | — | 62 / 62; AdventureWorks 47 / 47, Northwind 40 / 40; 17 / 17 on each dataset |
 | `make compile` (`-Wall`) | clean | clean |
 
 The 13 failures on 1.2.0 are exactly the encoded requests; the unknown-option and
 `$batch` checks pass on both builds, as intended.
 
-Genero 5: the whole library compiles with `fglcomp -M -Wall -Werror` and `make test`
-passes (62 / 62) on 5.00.00. A minimal non-packaged REST service declaring
-`WSName = "%24top"` was run under GWS on 5.00.00, 5.00.02, 5.00.03 and 6.00.03: all
-four accept the name, route `?%24top=2` to it, apply the `$`-wins rule and still
-answer `400` for `?%24bogus=1`. (Separately, and unchanged by this fix, the packaged
-`com.fourjs.odatalib.ODataService` module could not be registered by the 5.00.00,
-5.00.02 and 5.00.03 runtimes tried: `-15536 The module name must not contain a '.'`,
-identically on unmodified 1.2.0.)
+Genero 5: the library needs **5.01.02 or later**. The web services engine accepts a
+package-style module name in `RegisterRestService()` only from FGLGWS 5.01.02 (Genero
+5.01 migration notes, "Register web services and resources from a package"). Before
+that the packaged `com.fourjs.odatalib.ODataService` module cannot be registered:
+`-15536 The module name must not contain a '.'`. That was observed on the 5.00.00,
+5.00.02 and 5.00.03 runtimes and is identical on unmodified 1.2.0, so it is unrelated
+to this fix. On 5.01.02 the whole library compiles with `-Wall`, the packaged service
+registers and serves, and the last row of the table above passes. 5.01.00 and 5.01.01
+were not available to test. A minimal non-packaged REST service declaring
+`WSName = "%24top"` was also run under GWS on 5.00.00, 5.00.02, 5.00.03 and 6.00.03:
+all four accept the name, route `?%24top=2` to it, apply the `$`-wins rule and still
+answer `400` for `?%24bogus=1`. `fglpkg.json` therefore declares
+`"genero": ">=5.1.2"` from v1.2.1 (v1.2.0 declared `>=5.0.0`).

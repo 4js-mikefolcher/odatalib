@@ -19,6 +19,11 @@
 #                          adventureworks       examples/adventureworks.odata
 #   ODATA_CURL_OPTS      extra curl arguments, e.g. "-u user:password"
 #
+# Target a PostgreSQL example service without an authorizer. It is not valid
+# against the in-memory SQLite example (examples/NorthwindService): northwind.odata
+# has no ShipCountry (checks 6, 8, 10b get 400) and NorthwindAuth answers 401 to the
+# inner $batch request. Those four checks fail the same way on every Genero version.
+#
 # For every case the encoded request and the plain "$" request must both return
 # 200 with byte-identical bodies. Unknown options must still return 400 (the
 # endpoints must not turn into "accept any parameter"). The script exits

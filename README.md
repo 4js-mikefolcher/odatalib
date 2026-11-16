@@ -345,7 +345,12 @@ Before any public deployment, work through this checklist:
 
 ## Building & installing
 
-The library compiles against Genero 6.x (developed with `fglcomp 6.00.01`).
+The library needs **Genero 6.x, or Genero 5.01.02 or later**. 5.01.02 is the first
+release whose web services engine (FGLGWS) accepts a package-style module name in
+`RegisterRestService()`; on 5.00.x the REST service cannot be registered
+(`-15536 The module name must not contain a '.'`), so `fglpkg.json` declares
+`"genero": ">=5.1.2"`. Developed with `fglcomp 6.00.01`; the regression and
+live-database suites pass on 6.00.03 and on 5.01.02.
 
 ```bash
 # Set the library on the module path (the package root is the project root)
@@ -569,6 +574,14 @@ ODATA_PROFILE=adventureworks ODATA_URL=http://localhost/gas6/ws/r/<xcf>/adventur
 ```
 
 `ODATA_CURL_OPTS` passes extra arguments to `curl` (e.g. `-u user:password`).
+
+The suite is written for the PostgreSQL examples (`northwind-pg.odata`,
+`adventureworks.odata`) served without an authorizer. Do not point it at the
+in-memory SQLite example (`examples/NorthwindService`): `northwind.odata` has no
+`ShipCountry`, so the `Orders` checks that filter or group on it get `400` on their
+plain request, and the example's `NorthwindAuth` answers `401` unless an
+`X-OData-Scopes` header is sent (it is never sent on the inner `$batch` request).
+Those four checks fail identically on every Genero version.
 
 ## Limitations & roadmap
 
