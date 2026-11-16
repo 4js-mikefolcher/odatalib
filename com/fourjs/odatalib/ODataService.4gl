@@ -186,6 +186,14 @@ PUBLIC FUNCTION getEntitySet(
     pOrderby STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$orderby"),
     pExpand STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$expand"),
     pApply STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$apply"),
+      selectEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24select", WSDescription = "Alias of $select"),
+      filterEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24filter", WSDescription = "Alias of $filter"),
+      topEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24top", WSDescription = "Alias of $top"),
+      skipEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24skip", WSDescription = "Alias of $skip"),
+      countEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24count", WSDescription = "Alias of $count"),
+      orderbyEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24orderby", WSDescription = "Alias of $orderby"),
+      expandEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24expand", WSDescription = "Alias of $expand"),
+      applyEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24apply", WSDescription = "Alias of $apply"),
     hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
     hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
     ATTRIBUTES(WSGet,
@@ -196,6 +204,19 @@ PUBLIC FUNCTION getEntitySet(
     DEFINE isKeyReq BOOLEAN
     DEFINE name, keyVal STRING
     DEFINE sub ODataTypes.T_ODataSubResponse
+
+   # The <name>Encoded parameters accept the percent-encoded spelling of each
+   # option (%24top for $top). GWS matches query names literally against WSName
+   # and answers 400 before dispatch otherwise. If an option arrives in both
+   # spellings, the "$" form wins.
+   IF pSelect IS NULL THEN LET pSelect = selectEncoded END IF
+   IF pFilter IS NULL THEN LET pFilter = filterEncoded END IF
+   IF pTop IS NULL THEN LET pTop = topEncoded END IF
+   IF pSkip IS NULL THEN LET pSkip = skipEncoded END IF
+   IF pCount IS NULL THEN LET pCount = countEncoded END IF
+   IF pOrderby IS NULL THEN LET pOrderby = orderbyEncoded END IF
+   IF pExpand IS NULL THEN LET pExpand = expandEncoded END IF
+   IF pApply IS NULL THEN LET pApply = applyEncoded END IF
 
     # Defensive guard if a literal path leaked into the placeholder route.
     IF entitySet == "$metadata" THEN
@@ -226,6 +247,7 @@ END FUNCTION
 PUBLIC FUNCTION getEntityCount(
     entitySet STRING ATTRIBUTES(WSParam),
     pFilter STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$filter"),
+      filterEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24filter", WSDescription = "Alias of $filter"),
     hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
     hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
     ATTRIBUTES(WSGet,
@@ -235,6 +257,9 @@ PUBLIC FUNCTION getEntityCount(
     DEFINE name, keyVal STRING
     DEFINE isKeyReq BOOLEAN
     DEFINE sub ODataTypes.T_ODataSubResponse
+
+   # %24filter alias; see getEntitySet.
+   IF pFilter IS NULL THEN LET pFilter = filterEncoded END IF
 
     CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
     IF isKeyReq THEN
@@ -270,6 +295,14 @@ PUBLIC FUNCTION getNavigation(
     pOrderby STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$orderby"),
     pExpand STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$expand"),
     pApply STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "$apply"),
+      selectEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24select", WSDescription = "Alias of $select"),
+      filterEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24filter", WSDescription = "Alias of $filter"),
+      topEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24top", WSDescription = "Alias of $top"),
+      skipEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24skip", WSDescription = "Alias of $skip"),
+      countEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24count", WSDescription = "Alias of $count"),
+      orderbyEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24orderby", WSDescription = "Alias of $orderby"),
+      expandEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24expand", WSDescription = "Alias of $expand"),
+      applyEncoded STRING ATTRIBUTES(WSQuery, WSOptional, WSName = "%24apply", WSDescription = "Alias of $apply"),
     hScopes STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-Scopes"),
     hUser STRING ATTRIBUTES(WSHeader, WSOptional, WSName = "X-OData-User"))
     ATTRIBUTES(WSGet,
@@ -279,6 +312,16 @@ PUBLIC FUNCTION getNavigation(
     DEFINE name, keyVal STRING
     DEFINE isKeyReq BOOLEAN
     DEFINE sub ODataTypes.T_ODataSubResponse
+
+   # %24 aliases of the eight options; see getEntitySet.
+   IF pSelect IS NULL THEN LET pSelect = selectEncoded END IF
+   IF pFilter IS NULL THEN LET pFilter = filterEncoded END IF
+   IF pTop IS NULL THEN LET pTop = topEncoded END IF
+   IF pSkip IS NULL THEN LET pSkip = skipEncoded END IF
+   IF pCount IS NULL THEN LET pCount = countEncoded END IF
+   IF pOrderby IS NULL THEN LET pOrderby = orderbyEncoded END IF
+   IF pExpand IS NULL THEN LET pExpand = expandEncoded END IF
+   IF pApply IS NULL THEN LET pApply = applyEncoded END IF
 
     CALL splitEntityKey(entitySet) RETURNING name, keyVal, isKeyReq
     CALL dispatchNavigation(name, keyVal, isKeyReq, navProp,
